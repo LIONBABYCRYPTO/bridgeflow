@@ -22,7 +22,7 @@ export default function Header() {
         </div>
 
         <ConnectButton.Custom>
-          {({ openConnectModal, account, authenticationStatus, mounted }) => {
+          {({ openConnectModal, openAccountModal, account, authenticationStatus, mounted }) => {
             const ready = mounted && authenticationStatus !== 'loading'
             const connected = ready && account
 
@@ -95,7 +95,7 @@ export default function Header() {
                                       Switch Network
                                     </button>
                                     <button
-                                      onClick={() => { setShowMenu(false) }}
+                                      onClick={() => { setShowMenu(false); openAccountModal?.() }}
                                       className="w-full px-3 py-2.5 rounded-xl text-sm text-text-primary hover:bg-surface-hover transition-all text-left"
                                     >
                                       Account Details
