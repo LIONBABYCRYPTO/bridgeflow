@@ -247,64 +247,116 @@ export async function executeBridge(
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
   if (!route) {
     onStatus('error')
-    return { success: false, error: 'No route data. Cannot execute bridge.' }
+    return { success: false, error: 'No route data. Get a quote first.' }
+  }
+
+  // Validate route structure before sending to SDK
+  if (!route.id) {
+    onStatus('error')
+    return { success: false, error: 'Route missing ID. Try fetching a new quote.' }
+  }
+  if (!route.steps || route.steps.length === 0) {
+    onStatus('error')
+    return { success: false, error: 'Route has no steps. This pair may not be supported.' }
+  }
+
+  const firstStep = route.steps[0]
+  if (!firstStep) {
+    onStatus('error')
+    return { success: false, error: 'Route step is empty.' }
+  }
+  if (!firstStep.transactionRequest) {
+    onStatus('error')
+    return { success: false, error: 'No transaction data in route. The bridge/swap tool did not return executable data.' }
+  }
+
+  const tx = firstStep.transactionRequest as any
+  if (!tx.to || !tx.data || tx.data === '0x') {
+    onStatus('error')
+    return { success: false, error: 'Transaction data is empty. The routing tool could not generate a valid transaction.' }
+  }
+  if (!tx.from) {
+    onStatus('error')
+    return { success: false, error: 'Transaction has no "from" address. Ensure your wallet is connected.' }
+  }
+  if (tx.from !== (window.ethereum as any)?.selectedAddress) {
+    onStatus('error')
+    return { success: false, error: `Route was built for address ${tx.from.slice(0,6)}...${tx.from.slice(-4)} but your wallet is different. Please reconnect.` }
   }
 
   try {
     const wallet = window.ethereum
     if (!wallet) {
-      return { success: false, error: 'No wallet found. Please install MetaMask.' }
+      return { success: false, error: 'No wallet found. Please install MetaMask or use an in-app wallet.' }
     }
 
     onStatus('preparing')
 
+    // Verify the route action details for display
+    const action = firstStep.action
+    const toolName = (route as any).tool || firstStep.tool || 'LI.FI'
+    console.log(`Executing bridge: ${action?.fromChainId}→${action?.toChainId} via ${toolName}`)
+
     await lifiExecute(client, route, {
       // @ts-ignore - SDK v4 execution options types are internal
       updateRouteHook: (updatedRoute: any) => {
-        const step = updatedRoute.steps?.[0]
-        if (!step?.execution) return
-        const exec = step.execution
-        const processes = exec.process || []
-        const lastProcess = processes[processes.length - 1]
+        try {
+          const execStep = updatedRoute.steps?.[0]
+          if (!execStep?.execution) return
+          const exec = execStep.execution
+          const processes = exec.process || []
+          const lastProcess = processes[processes.length - 1]
 
-        if (exec.status === 'FAILED') {
-          onStatus('error')
-          return
-        }
-
-        if (lastProcess) {
-          switch (lastProcess.type) {
-            case 'TOKEN_ALLOWANCE':
-            case 'TOKEN_APPROVAL':
-              onStatus(lastProcess.status === 'DONE' ? 'approve_sent' : 'approving')
-              break
-            case 'SWAP':
-            case 'CROSS_CHAIN':
-            case 'RECEIVED_CHAIN':
-              onStatus(lastProcess.status === 'DONE' ? 'confirming' : 'bridging', lastProcess.txHash)
-              break
+          if (exec.status === 'FAILED') {
+            onStatus('error')
+            // Log the failure reason for debugging
+            processes.map((p: any) => p.error?.message || '').filter(Boolean).forEach((m: string) => console.error('Step process error:', m))
+            return
           }
-        }
 
-        if (exec.status === 'DONE') {
-          const txHash = processes.find((p: any) => p.txHash)?.txHash
-          onStatus('complete', txHash)
+          if (lastProcess) {
+            switch (lastProcess.type) {
+              case 'TOKEN_ALLOWANCE':
+              case 'TOKEN_APPROVAL':
+                onStatus(lastProcess.status === 'DONE' ? 'approve_sent' : 'approving', lastProcess.txHash)
+                break
+              case 'SWAP':
+              case 'CROSS_CHAIN':
+              case 'RECEIVED_CHAIN':
+                onStatus(lastProcess.status === 'DONE' ? 'confirming' : 'bridging', lastProcess.txHash)
+                break
+              default:
+                if (lastProcess.status === 'DONE') {
+                  onStatus('confirming', lastProcess.txHash)
+                }
+            }
+          }
+
+          if (exec.status === 'DONE') {
+            const txHash = processes.find((p: any) => p.txHash)?.txHash
+            onStatus('complete', txHash)
+          }
+        } catch (hookErr: any) {
+          console.error('updateRouteHook error:', hookErr)
         }
       },
       // @ts-ignore - SDK v4 execution options types are internal
       switchChainHook: async (requiredChainId: any) => {
         try {
           onStatus('switching_chain')
-          await wallet.request({
+          const resp = await wallet.request({
             method: 'wallet_switchEthereumChain',
-            params: [{ chainId: '0x' + requiredChainId.toString(16) }],
+            params: [{ chainId: '0x' + Number(requiredChainId).toString(16) }],
           })
+          return resp
         } catch (switchErr: any) {
           if (switchErr.code === 4902) {
-            throw new Error(`Chain ${requiredChainId} not supported in your wallet.`)
+            throw new Error(`Chain ${requiredChainId} is not available in your wallet. Please add it first.`)
           }
-          // User rejected switch
-          throw new Error('Please switch to the correct network to continue.')
+          if (switchErr.code === -32002) {
+            throw new Error('Wallet is already processing a request. Please check your wallet extension.')
+          }
+          throw new Error('Network switch cancelled or failed.')
         }
       },
     })
@@ -313,10 +365,41 @@ export async function executeBridge(
   } catch (e: any) {
     console.error('Execute error:', e)
     const msg = e?.message || ''
-    if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('DENIED')) {
-      return { success: false, error: 'Transaction was cancelled.' }
+
+    // User rejection
+    if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('DENIED') || msg.includes('ACTION_REJECTED')) {
+      return { success: false, error: 'Transaction was cancelled in your wallet.' }
     }
-    return { success: false, error: msg || 'Bridge failed. Check console.' }
+
+    // RPC errors
+    if (msg.includes('insufficient funds') || msg.includes('insufficient balance')) {
+      return { success: false, error: 'Insufficient funds to cover gas fees. Add ETH to your wallet for gas.' }
+    }
+    if (msg.includes('gas required exceeds allowance') || msg.includes('intrinsic gas too low')) {
+      return { success: false, error: 'Gas estimation failed. The transaction may be too complex or your balance too low.' }
+    }
+    if (msg.includes('nonce too low')) {
+      return { success: false, error: 'Transaction nonce error. Try again or reset your wallet activity.' }
+    }
+    if (msg.includes('execution reverted') || msg.includes('revert')) {
+      return { success: false, error: 'Transaction was reverted on-chain. This could mean insufficient balance, expired approval, or a contract error.' }
+    }
+    if (msg.includes('Internal JSON-RPC')) {
+      return { success: false, error: 'Wallet RPC error. Try switching RPC provider or try again.' }
+    }
+    if (msg.includes('Network error') || msg.includes('Failed to fetch')) {
+      return { success: false, error: 'Network error. Check your internet connection and try again.' }
+    }
+
+    // SDK internal errors
+    if (msg.includes('Cannot read properties of undefined') || msg.includes('is not a function') || msg.includes('is not defined')) {
+      return { success: false, error: 'Internal error in the bridge SDK. The route format may be incorrect. Try getting a fresh quote.' }
+    }
+    if (msg.includes('aborted') || msg.includes('timeout')) {
+      return { success: false, error: 'Request timed out. The bridge provider may be slow. Try again.' }
+    }
+
+    return { success: false, error: msg || 'Bridge failed. See browser console for details.' }
   }
 }
 
