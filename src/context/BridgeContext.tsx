@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { createContext, useContext, useState, useCallback, useRef } from 'react'
+import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
 import { useAccount } from 'wagmi'
 import { fetchLiveRoute, addHistory, executeBridge, type LiveRoute } from '../data/chains'
 import type { Route } from '@lifi/sdk'
@@ -35,8 +35,9 @@ interface BridgeContextType {
   setNaturalInput: (v: string) => void
   setMigrateMode: (v: boolean) => void
   reset: () => void
-  fetchRoute: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<void>
+  fetchRoute: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<LiveRoute | null>
   startBridge: () => Promise<void>
+  fetchAndBridge: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<void>
 }
 
 const defaultState: BridgeState = {
@@ -71,18 +72,22 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     if (result.rawRoute) routeRef.current = result.rawRoute
     if (result.route) {
       patch({ route: result.route, loadingRoute: false, step: 'route' })
+      return result.route
     } else {
       patch({ loadingRoute: false, routeError: result.error || 'No route available for this pair.' })
+      return null
     }
   }, [address])
 
   const startBridge = useCallback(async () => {
-    const s = state
-    if (!s.route || !s.asset || !s.amount || !s.fromChain || !s.toChain) return
+    // Read fresh state from refs to avoid stale closure
+    const s = stateRef.current
+    const rawRoute = routeRef.current
+    if (!rawRoute || !s.asset || !s.amount || !s.fromChain || !s.toChain) return
 
-    patch({ bridgeStatus: 'preparing', bridgeError: null })
+    patch({ step: 'bridge', bridgeStatus: 'preparing', bridgeError: null })
 
-    const result = await executeBridge(routeRef.current, (status, txHash) => {
+    const result = await executeBridge(rawRoute, (status, txHash) => {
       const statusMap: Record<string, BridgeState['bridgeStatus']> = {
         preparing: 'preparing',
         switching_chain: 'switching_chain',
@@ -112,7 +117,71 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     } else {
       patch({ bridgeStatus: 'error', bridgeError: result.error || 'Bridge failed' })
     }
-  }, [state])
+  }, [])
+
+  // fetch quote + immediately bridge (used by MigrateWallet)
+  const fetchAndBridge = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
+    patch({
+      fromChain: from,
+      toChain: to,
+      asset: asset,
+      amount: String(amount),
+      loadingRoute: true,
+      route: null,
+      routeError: null,
+      bridgeStatus: 'preparing',
+      bridgeError: null,
+      migrateMode: false,
+    })
+
+    const result = await fetchLiveRoute(from, to, asset, amount, address || undefined)
+    if (result.rawRoute) routeRef.current = result.rawRoute
+
+    if (!result.route) {
+      patch({ loadingRoute: false, routeError: result.error || 'No route available.' })
+      return
+    }
+
+    patch({ route: result.route, loadingRoute: false })
+
+    // Now execute the bridge
+    patch({ step: 'bridge', bridgeStatus: 'preparing' })
+
+    const execResult = await executeBridge(result.rawRoute, (status, txHash) => {
+      const statusMap: Record<string, BridgeState['bridgeStatus']> = {
+        preparing: 'preparing',
+        switching_chain: 'switching_chain',
+        approving: 'approving',
+        approve_sent: 'approve_sent',
+        bridging: 'bridging',
+        confirming: 'confirming',
+        complete: 'done',
+        error: 'error',
+      }
+      const mapped = statusMap[status] || 'bridging'
+      patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
+    })
+
+    if (execResult.success) {
+      addHistory({
+        id: Date.now().toString(),
+        asset,
+        amount,
+        fromChain: from,
+        toChain: to,
+        status: 'completed',
+        timestamp: new Date().toLocaleString(),
+        txHash: execResult.txHash || 'sent',
+      })
+      patch({ bridgeStatus: 'done', txHash: execResult.txHash || null, step: 'complete' })
+    } else {
+      patch({ bridgeStatus: 'error', bridgeError: execResult.error || 'Bridge failed' })
+    }
+  }, [address])
+
+  // Keep state ref for use in callbacks
+  const stateRef = useRef(state)
+  useEffect(() => { stateRef.current = state }, [state])
 
   return (
     <BridgeContext.Provider value={{
@@ -128,6 +197,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       reset: () => { setState(defaultState); routeRef.current = null },
       fetchRoute: fetchRouteFn,
       startBridge,
+      fetchAndBridge,
     }}>
       {children}
     </BridgeContext.Provider>

@@ -10,7 +10,7 @@ const ASSET_ICONS: Record<string, string> = {
 
 export default function MigrateWallet() {
   const { address } = useAccount()
-  const { setAsset, setAmount, setFromChain, setToChain, setMigrateMode, fetchRoute } = useBridge()
+  const { setMigrateMode, fetchAndBridge } = useBridge()
   const [balances, setBalances] = useState<WalletBalance[]>([])
   const [loading, setLoading] = useState(true)
   const [amounts, setAmounts] = useState<Record<string, string>>({})
@@ -42,12 +42,7 @@ export default function MigrateWallet() {
     const amt = amounts[key] || String(item.amount)
     const dest = dests[key]
     if (!dest) return
-    setAsset(item.asset as any)
-    setAmount(amt)
-    setFromChain(item.chain)
-    setToChain(dest)
-    setMigrateMode(false)
-    fetchRoute(item.chain, dest, item.asset as any, parseFloat(amt))
+    fetchAndBridge(item.chain, dest, item.asset, parseFloat(amt))
   }
 
   const bridgeAll = (dest: ChainId) => {
@@ -55,12 +50,7 @@ export default function MigrateWallet() {
     if (!first) return
     const key = first.asset + first.chain
     const amt = amounts[key] || String(first.amount)
-    setAsset(first.asset as any)
-    setAmount(amt)
-    setFromChain(first.chain)
-    setToChain(dest)
-    setMigrateMode(false)
-    fetchRoute(first.chain, dest, first.asset as any, parseFloat(amt))
+    fetchAndBridge(first.chain, dest, first.asset, parseFloat(amt))
   }
 
   const chainKeys = Object.keys(CHAINS) as ChainId[]
