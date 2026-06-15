@@ -8,7 +8,7 @@ interface Props {
 
 export default function RouteSummary({ onBridge }: Props) {
   const { state, setStep } = useBridge()
-  const { route, loadingRoute } = state
+  const { route, loadingRoute, routeError } = state
 
   if (loadingRoute) {
     return (
@@ -25,6 +25,39 @@ export default function RouteSummary({ onBridge }: Props) {
           ⟠
         </motion.div>
         <p className="text-text-secondary text-sm">Finding the best route...</p>
+      </motion.div>
+    )
+  }
+
+  // Error state — route not found
+  if (routeError) {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="text-center space-y-5 py-8"
+      >
+        <div className="text-5xl">⚠️</div>
+        <h2 className="text-lg font-semibold text-text-primary">Route Unavailable</h2>
+        <p className="text-sm text-text-secondary px-4">{routeError}</p>
+        <p className="text-xs text-text-tertiary px-4">
+          LI.FI supports many but not all token/chain combinations.
+          Try a different asset or chain pair.
+        </p>
+        <div className="flex gap-3 justify-center pt-2">
+          <button
+            onClick={() => setStep('chain')}
+            className="px-6 py-3 rounded-xl border border-border-light text-text-secondary font-medium text-sm hover:bg-surface-hover transition-all cursor-pointer"
+          >
+            Change Chains
+          </button>
+          <button
+            onClick={() => setStep('asset')}
+            className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
+          >
+            Change Asset
+          </button>
+        </div>
       </motion.div>
     )
   }

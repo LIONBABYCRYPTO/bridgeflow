@@ -1,4 +1,5 @@
-import { createClient, getQuote, ChainKey } from '@lifi/sdk'
+import { createClient, getQuote, getToken, executeRoute as lifiExecute, ChainKey } from '@lifi/sdk'
+import type { Route } from '@lifi/sdk'
 
 const client = createClient({
   integrator: 'bridgeflow',
@@ -10,24 +11,26 @@ export interface ChainInfo {
   key: ChainKey
   color: string
   icon: string
+  explorer: string
+  tokenListUrl?: string
 }
 
 export const CHAINS: Record<string, ChainInfo> = {
-  ethereum: { id: 1, name: 'Ethereum', key: ChainKey.ETH, color: '#627eea', icon: '◆' },
-  base: { id: 8453, name: 'Base', key: ChainKey.BAS, color: '#0052ff', icon: '◈' },
-  arbitrum: { id: 42161, name: 'Arbitrum', key: ChainKey.ARB, color: '#28a0f0', icon: '◇' },
-  polygon: { id: 137, name: 'Polygon', key: ChainKey.POL, color: '#8247e5', icon: '⬡' },
-  optimism: { id: 10, name: 'Optimism', key: ChainKey.OPT, color: '#ff0420', icon: '○' },
-  bsc: { id: 56, name: 'BNB Chain', key: ChainKey.BSC, color: '#f0b90b', icon: '⬟' },
-  cronos: { id: 25, name: 'Cronos', key: ChainKey.CRO, color: '#1a0f2e', icon: '⟐' },
+  ethereum: { id: 1, name: 'Ethereum', key: ChainKey.ETH, color: '#627eea', icon: '◆', explorer: 'https://etherscan.io' },
+  base: { id: 8453, name: 'Base', key: ChainKey.BAS, color: '#0052ff', icon: '◈', explorer: 'https://basescan.org' },
+  arbitrum: { id: 42161, name: 'Arbitrum', key: ChainKey.ARB, color: '#28a0f0', icon: '◇', explorer: 'https://arbiscan.io' },
+  polygon: { id: 137, name: 'Polygon', key: ChainKey.POL, color: '#8247e5', icon: '⬡', explorer: 'https://polygonscan.com' },
+  optimism: { id: 10, name: 'Optimism', key: ChainKey.OPT, color: '#ff0420', icon: '○', explorer: 'https://optimistic.etherscan.io' },
+  bsc: { id: 56, name: 'BNB Chain', key: ChainKey.BSC, color: '#f0b90b', icon: '⬟', explorer: 'https://bscscan.com' },
+  cronos: { id: 25, name: 'Cronos', key: ChainKey.CRO, color: '#1a0f2e', icon: '⟐', explorer: 'https://cronoscan.com' },
 }
 
 export const ASSETS = [
-  { symbol: 'USDC', name: 'USD Coin', icon: '💲' },
-  { symbol: 'USDT', name: 'Tether', icon: '💵' },
-  { symbol: 'ETH', name: 'Ether', icon: '⟠' },
-  { symbol: 'BTC', name: 'Bitcoin (WBTC)', icon: '₿' },
-  { symbol: 'CRO', name: 'Cronos', icon: '🔷' },
+  { symbol: 'USDC', name: 'USD Coin', icon: '💲', decimals: 6 },
+  { symbol: 'USDT', name: 'Tether', icon: '💵', decimals: 6 },
+  { symbol: 'ETH', name: 'Ether', icon: '⟠', decimals: 18 },
+  { symbol: 'BTC', name: 'WBTC', icon: '₿', decimals: 8 },
+  { symbol: 'CRO', name: 'Cronos', icon: '🔷', decimals: 18 },
 ]
 
 export type AssetSymbol = 'USDC' | 'USDT' | 'ETH' | 'BTC' | 'CRO'
@@ -44,36 +47,67 @@ export interface LiveRoute {
   safetyScore: number
 }
 
-export interface RouteStep {
-  fromChainId: number
-  toChainId: number
-  fromToken: string
-  toToken: string
-  fromAmount: string
-  toAmountMin: string
-  txData: {
-    to: string
-    data: string
-    value: string
-    from: string
-    gas?: string
-    gasPrice?: string
+// Resolve token address for a given chain+symbol via LI.FI's token database
+async function resolveTokenAddress(chainId: number, symbol: string): Promise<string> {
+  try {
+    const token = await getToken(client, chainId, symbol)
+    if (token?.address) return token.address
+  } catch {}
+  // Fallback to known addresses
+  const ADDRESSES: Record<number, Record<string, string>> = {
+    1: {
+      USDC: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+      USDT: '0xdAC17F958D2ee523a2206206994597C13D831ec7',
+      ETH: '0x0000000000000000000000000000000000000000',
+      BTC: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599',
+      CRO: '0xA0b73E1Ff0B80914AB6fe0444E65848C4C34450b',
+    },
+    8453: {
+      USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+      USDT: '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2',
+      ETH: '0x0000000000000000000000000000000000000000',
+      BTC: '0xc1CBa3fCea344f92D9232cF961d89d7eB6f719B7',
+    },
+    42161: {
+      USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+      USDT: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
+      ETH: '0x0000000000000000000000000000000000000000',
+      BTC: '0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f',
+    },
+    137: {
+      USDC: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+      USDT: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F',
+      ETH: '0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',
+      BTC: '0x1bfd67037b42cf73acF2047067bd4F2C47D9BfD6',
+    },
+    10: {
+      USDC: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',
+      USDT: '0x94b008aA00579c1307B0EF2c499aD98a8ce58e58',
+      ETH: '0x0000000000000000000000000000000000000000',
+    },
+    56: {
+      USDC: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+      USDT: '0x55d398326f99059fF775485246999027B3197955',
+      ETH: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8',
+      BTC: '0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c',
+    },
+    25: {
+      USDC: '0xc21223249CA28397B4B6541dfFaEcC539BfF0c59',
+      USDT: '0x66e428c3f67a68878562e79A0234c1F83c208770',
+      CRO: '0x0000000000000000000000000000000000000000',
+    },
   }
-  approvalAddress?: string
-  estimatedGas: string
-  estimatedGasUSD: string
-  toolOrder: string
+  const addr = ADDRESSES[chainId]?.[symbol]
+  if (!addr) throw new Error(`No address known for ${symbol} on chain ${chainId}`)
+  return addr
 }
 
-export interface RawRoute {
-  steps: RouteStep[]
-  fromChain: number
-  toChain: number
-  fromAmount: string
-  fromToken: string
-  toToken: string
-  fromAddress: string
-  slippage: number
+function getAssetDecimals(symbol: string): number {
+  return ASSETS.find(a => a.symbol === symbol)?.decimals || 18
+}
+
+function formatAmount(amount: number, decimals: number): string {
+  return BigInt(Math.round(amount * 10 ** decimals)).toString()
 }
 
 export async function fetchLiveRoute(
@@ -82,18 +116,23 @@ export async function fetchLiveRoute(
   asset: AssetSymbol,
   amount: number,
   fromAddress?: string
-): Promise<{ route: LiveRoute | null; rawRoute: RawRoute | null }> {
+): Promise<{ route: LiveRoute | null; rawRoute: Route | null; error?: string }> {
+  const decimals = getAssetDecimals(asset)
   try {
     const fromChainId = CHAINS[fromChain].id
     const toChainId = CHAINS[toChain].id
     const addr = fromAddress || '0x0000000000000000000000000000000000000001'
 
+    // Resolve token addresses
+    const fromToken = await resolveTokenAddress(fromChainId, asset)
+    const toToken = await resolveTokenAddress(toChainId, asset)
+
     const result = await getQuote(client, {
       fromChain: fromChainId,
       toChain: toChainId,
-      fromToken: asset,
-      toToken: asset,
-      fromAmount: (amount * 1e18).toString(),
+      fromToken,
+      toToken,
+      fromAmount: formatAmount(amount, decimals),
       fromAddress: addr,
       slippage: 0.01,
       order: 'RECOMMENDED',
@@ -101,54 +140,21 @@ export async function fetchLiveRoute(
 
     const routes = Array.isArray(result) ? result : [result]
     const best = routes[0]
-    if (!best?.steps?.[0]?.estimate) throw new Error('No estimate from LI.FI')
+    if (!best?.steps?.[0]?.estimate) throw new Error('No route found — this pair may not be supported.')
 
+    const route = best as Route
     // @ts-ignore
     const est = best.steps[0].estimate
-    // @ts-ignore
-    const tx = best.steps[0].transactionRequest
 
     let totalGas = 0
     let totalFee = 0
     if (est.gasCosts) est.gasCosts.forEach((g: any) => { totalGas += parseFloat(g.amountUSD || '0') })
     if (est.feeCosts) est.feeCosts.forEach((f: any) => { totalFee += parseFloat(f.amountUSD || '0') })
 
-    const receive = parseFloat(est.toAmountMin) / 1e18 || amount * 0.995
+    const toDecimals = getAssetDecimals(asset)
+    const receive = parseFloat(est.toAmountMin) / (10 ** toDecimals) || amount * 0.995
     const execDur = est.executionDuration || 120
     const timeStr = execDur < 60 ? `~${execDur}s` : execDur < 3600 ? `~${Math.round(execDur / 60)}m` : `~${(execDur / 3600).toFixed(1)}h`
-
-    // @ts-ignore
-    const approvalAddress = best.steps[0].estimate?.approvalAddress
-
-    const rawRoute: RawRoute = {
-      steps: [{
-        fromChainId,
-        toChainId,
-        fromToken: asset,
-        toToken: asset,
-        fromAmount: (amount * 1e18).toString(),
-        toAmountMin: est.toAmountMin || '0',
-        txData: tx ? {
-          to: tx.to,
-          data: tx.data,
-          value: tx.value || '0x0',
-          from: addr,
-          ...(tx.gas ? { gas: tx.gas } : {}),
-          ...(tx.gasPrice ? { gasPrice: tx.gasPrice } : {}),
-        } : { to: '', data: '0x', value: '0x0', from: addr },
-        approvalAddress: approvalAddress || undefined,
-        estimatedGas: est.gasCosts?.[0]?.amount || '0',
-        estimatedGasUSD: totalGas.toString(),
-        toolOrder: `LI.FI Routing`,
-      }],
-      fromChain: fromChainId,
-      toChain: toChainId,
-      fromAmount: (amount * 1e18).toString(),
-      fromToken: asset,
-      toToken: asset,
-      fromAddress: addr,
-      slippage: 0.01,
-    }
 
     return {
       route: {
@@ -162,151 +168,92 @@ export async function fetchLiveRoute(
         bridgeFee: Math.round(totalFee * 100) / 100,
         safetyScore: 95,
       },
-      rawRoute,
+      rawRoute: route as Route,
     }
-  } catch (e) {
-    console.warn('LI.FI quote failed:', e)
-    const fee = amount * 0.0015
-    const network = Math.random() * 0.5 + 0.2
-    const receive = amount - fee - network * 0.01
-    const safety = Math.floor(85 + Math.random() * 15)
-    const times = ['~30s', '~1m', '~2m', '~3m', '~5m']
-    return {
-      route: {
-        fromChain,
-        toChain,
-        asset,
-        amount,
-        estimatedReceive: Math.round(receive * 100) / 100,
-        estimatedTime: times[Math.floor(Math.random() * times.length)],
-        networkFee: Math.round(network * 100) / 100,
-        bridgeFee: Math.round(fee * 100) / 100,
-        safetyScore: safety,
-      },
-      rawRoute: null,
-    }
+  } catch (e: any) {
+    const msg = e?.message || 'Quote failed'
+    console.warn('LI.FI quote failed:', msg)
+    return { route: null, rawRoute: null, error: msg }
   }
 }
 
-export async function executeRoute(
-  rawRoute: RawRoute | null,
+export async function executeBridge(
+  route: Route | null,
   onStatus: (status: string, txHash?: string) => void
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  if (!rawRoute?.steps?.[0]?.txData?.to) {
-    return simulateBridge(onStatus)
-  }
-
-  const step = rawRoute.steps[0]
-  const tx = step.txData
-  if (!tx.to || tx.data === '0x') {
-    return simulateBridge(onStatus)
+  if (!route) {
+    onStatus('error')
+    return { success: false, error: 'No route data. Cannot execute bridge.' }
   }
 
   try {
     const wallet = window.ethereum
     if (!wallet) {
-      return { success: false, error: 'No wallet found. Please install MetaMask or use an in-app wallet.' }
+      return { success: false, error: 'No wallet found. Please install MetaMask.' }
     }
 
-    // Switch to the correct chain first
-    const chainIdHex = '0x' + rawRoute.fromChain.toString(16)
-    try {
-      await wallet.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: chainIdHex }],
-      })
-    } catch (switchErr: any) {
-      if (switchErr.code === 4902) {
-        return { success: false, error: `Chain ${rawRoute.fromChain} not supported in your wallet.` }
-      }
-    }
+    onStatus('preparing')
 
-    // Handle approval if needed
-    if (step.approvalAddress) {
-      onStatus('approve')
-      // Build ERC20 approve tx
-      const approveData = tx.data
-      if (approveData && approveData !== '0x') {
-        const approveHash: string = await wallet.request({
-          method: 'eth_sendTransaction',
-          params: [{
-            from: tx.from,
-            to: step.approvalAddress,
-            data: approveData,
-            value: '0x0',
-          }],
-        })
-        onStatus('approve_sent', approveHash)
-      }
-    }
+    await lifiExecute(client, route, {
+      // @ts-ignore - SDK v4 execution options types are internal
+      updateRouteHook: (updatedRoute: any) => {
+        const step = updatedRoute.steps?.[0]
+        if (!step?.execution) return
+        const exec = step.execution
+        const processes = exec.process || []
+        const lastProcess = processes[processes.length - 1]
 
-    // Send the bridge tx
-    onStatus('bridge')
+        if (exec.status === 'FAILED') {
+          onStatus('error')
+          return
+        }
 
-    const txParams: any = {
-      from: tx.from,
-      to: tx.to,
-      data: tx.data,
-      value: tx.value || '0x0',
-    }
-    if (tx.gas) txParams.gas = tx.gas
-    if (tx.gasPrice) txParams.gasPrice = tx.gasPrice
+        if (lastProcess) {
+          switch (lastProcess.type) {
+            case 'TOKEN_ALLOWANCE':
+            case 'TOKEN_APPROVAL':
+              onStatus(lastProcess.status === 'DONE' ? 'approve_sent' : 'approving')
+              break
+            case 'SWAP':
+            case 'CROSS_CHAIN':
+            case 'RECEIVED_CHAIN':
+              onStatus(lastProcess.status === 'DONE' ? 'confirming' : 'bridging', lastProcess.txHash)
+              break
+          }
+        }
 
-    const txHash: string = await wallet.request({
-      method: 'eth_sendTransaction',
-      params: [txParams],
+        if (exec.status === 'DONE') {
+          const txHash = processes.find((p: any) => p.txHash)?.txHash
+          onStatus('complete', txHash)
+        }
+      },
+      // @ts-ignore - SDK v4 execution options types are internal
+      switchChainHook: async (requiredChainId: any) => {
+        try {
+          onStatus('switching_chain')
+          await wallet.request({
+            method: 'wallet_switchEthereumChain',
+            params: [{ chainId: '0x' + requiredChainId.toString(16) }],
+          })
+        } catch (switchErr: any) {
+          if (switchErr.code === 4902) {
+            throw new Error(`Chain ${requiredChainId} not supported in your wallet.`)
+          }
+          // User rejected switch
+          throw new Error('Please switch to the correct network to continue.')
+        }
+      },
     })
 
-    onStatus('confirming', txHash)
-
-    // Wait for 1 confirmation
-    let confirmed = false
-    for (let i = 0; i < 60; i++) {
-      await sleep(2000)
-      const receipt = await wallet.request({
-        method: 'eth_getTransactionReceipt',
-        params: [txHash],
-      })
-      if (receipt?.blockNumber) {
-        confirmed = true
-        break
-      }
-    }
-
-    if (!confirmed) {
-      // Transaction was sent but not confirmed yet — that's ok
-      onStatus('complete', txHash)
-      return { success: true, txHash }
-    }
-
-    onStatus('complete', txHash)
-    return { success: true, txHash }
+    return { success: true }
   } catch (e: any) {
     console.error('Execute error:', e)
     const msg = e?.message || ''
     if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('DENIED')) {
       return { success: false, error: 'Transaction was cancelled.' }
     }
-    return { success: false, error: msg || 'Transaction failed. Check console for details.' }
+    return { success: false, error: msg || 'Bridge failed. Check console.' }
   }
-}
-
-async function simulateBridge(
-  onStatus: (status: string, txHash?: string) => void
-): Promise<{ success: boolean; txHash: string }> {
-  onStatus('approve')
-  await sleep(800)
-  onStatus('approve_sent')
-  const txHash = '0x' + Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
-  await sleep(1500)
-  onStatus('bridge')
-  await sleep(2500)
-  onStatus('complete', txHash)
-  return { success: true, txHash }
-}
-
-function sleep(ms: number) {
-  return new Promise(r => setTimeout(r, ms))
 }
 
 export interface HistoryItem {

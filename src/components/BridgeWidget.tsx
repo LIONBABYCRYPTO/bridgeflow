@@ -40,7 +40,7 @@ export default function BridgeWidget() {
   return (
     <div className="space-y-6">
       {/* Migrate Wallet button */}
-      {!state.migrateMode && (
+      {!state.migrateMode && state.step !== 'route' && state.step !== 'bridge' && state.step !== 'complete' && (
       <motion.button
         whileHover={{ scale: 1.01 }}
         whileTap={{ scale: 0.97 }}

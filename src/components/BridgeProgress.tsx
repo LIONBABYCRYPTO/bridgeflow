@@ -4,29 +4,29 @@ import { CHAINS } from '../data/chains'
 
 export default function BridgeProgress() {
   const { state, reset } = useBridge()
-  const { route, bridgeStatus, bridgeError, txHash } = state
+  const { route, bridgeStatus, bridgeError, txHash, toChain } = state
 
-  const getStepIndex = () => {
-    switch (bridgeStatus) {
-      case 'approving': return 0
-      case 'approve_sent': return 1
-      case 'bridging': return 2
-      case 'confirming': return 3
-      case 'done': return 4
-      case 'error': return -1
-      default: return 0
-    }
-  }
+  const statusOrder = ['idle', 'preparing', 'switching_chain', 'approving', 'approve_sent', 'bridging', 'confirming', 'done', 'error']
+  const currentIdx = statusOrder.indexOf(bridgeStatus)
 
   const STEPS = [
-    { label: 'Approve Token', desc: 'Authorize the bridge to use your tokens' },
-    { label: 'Approval Sent', desc: 'Waiting for approval to confirm' },
-    { label: 'Sending', desc: 'Bridging your asset to destination chain' },
-    { label: 'Confirming', desc: 'Waiting for on-chain confirmation' },
-    { label: 'Done!', desc: 'Your assets have arrived' },
+    { id: 'preparing', label: 'Preparing', desc: 'Setting up the bridge request' },
+    { id: 'switching_chain', label: 'Network', desc: 'Switching to the correct chain' },
+    { id: 'approving', label: 'Approve', desc: 'Authorizing token usage' },
+    { id: 'approve_sent', label: 'Approved', desc: 'Token approval confirmed' },
+    { id: 'bridging', label: 'Bridging', desc: 'Sending your transaction' },
+    { id: 'confirming', label: 'Confirming', desc: 'Waiting for on-chain confirmation' },
+    { id: 'done', label: 'Complete!', desc: 'Your assets have arrived' },
   ]
 
-  const currentStep = getStepIndex()
+  const visibleSteps = STEPS.filter(s => {
+    // Skip switching_chain if bridgeStatus is past it
+    if (s.id === 'switching_chain' && currentIdx > statusOrder.indexOf('switching_chain') && bridgeStatus !== 'switching_chain') return false
+    // Skip approval steps if no approval needed
+    if ((s.id === 'approving' || s.id === 'approve_sent') && currentIdx > statusOrder.indexOf('approve_sent')) return false
+    return true
+  })
+
   const isComplete = bridgeStatus === 'done'
   const isError = bridgeStatus === 'error'
 
@@ -51,7 +51,7 @@ export default function BridgeProgress() {
             {txHash.slice(0, 10)}...{txHash.slice(-6)}
           </span>
           <a
-            href={`https://etherscan.io/tx/${txHash}`}
+            href={`${CHAINS[toChain || '']?.explorer || 'https://etherscan.io'}/tx/${txHash}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-accent hover:underline mt-1 inline-block"
@@ -63,47 +63,36 @@ export default function BridgeProgress() {
 
       {/* Progress timeline */}
       <div className="px-2">
-        {STEPS.map((step, i) => {
-          const done = i < currentStep
-          const active = i === currentStep
-          const failed = isError && i === currentStep
+        {visibleSteps.map((step, _i) => {
+          const stepStatusIdx = statusOrder.indexOf(step.id)
+          const done = stepStatusIdx < currentIdx
+          const active = stepStatusIdx === currentIdx
 
           return (
-            <div key={i} className="flex items-start gap-4 mb-6 last:mb-0 relative">
+            <div key={step.id} className="flex items-start gap-4 mb-5 last:mb-0 relative">
               <motion.div
                 animate={{ scale: active ? [1, 1.2, 1] : 1 }}
                 transition={{ duration: 0.3 }}
                 className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 z-10"
                 style={{
-                  backgroundColor: done ? '#34c759' : failed ? '#ff3b30' : active ? '#0071e3' : '#e5e5ea',
-                  color: done || active || failed ? 'white' : '#86868b',
+                  backgroundColor: done ? '#34c759' : active ? '#0071e3' : '#e5e5ea',
+                  color: done || active ? 'white' : '#86868b',
                 }}
               >
-                {done ? '✓' : failed ? '✕' : active ? '●' : i + 1}
+                {done ? '✓' : active ? '●' : (_i + 1)}
               </motion.div>
-
-              {i < STEPS.length - 1 && (
-                <div
-                  className="absolute left-[14px] top-8 w-0.5 h-6 -translate-x-1/2 z-0"
-                  style={{
-                    background: done
-                      ? '#34c759'
-                      : 'linear-gradient(to bottom, #0071e3, #e5e5ea)',
-                  }}
-                />
-              )}
 
               <div className="pt-1.5 flex-1 min-w-0">
                 <span
                   className="text-sm font-medium transition-colors duration-300"
-                  style={{ color: done ? '#34c759' : failed ? '#ff3b30' : active ? '#0071e3' : '#86868b' }}
+                  style={{ color: done ? '#34c759' : active ? '#0071e3' : '#86868b' }}
                 >
                   {step.label}
                 </span>
                 <p className="text-xs text-text-tertiary mt-0.5">{step.desc}</p>
               </div>
 
-              {active && !done && !failed && (
+              {active && !done && (
                 <motion.div className="pt-2 shrink-0">
                   <motion.div
                     animate={{ rotate: 360 }}
@@ -119,8 +108,10 @@ export default function BridgeProgress() {
 
       {isError && (
         <div className="text-center space-y-3">
+          <div className="text-4xl">❌</div>
           <p className="text-sm text-danger px-4">{bridgeError || 'Something went wrong'}</p>
-          <div className="flex gap-3 justify-center">
+          <p className="text-xs text-text-tertiary">If you cancelled in your wallet, just try again.</p>
+          <div className="flex gap-3 justify-center pt-2">
             <button
               onClick={reset}
               className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
@@ -150,7 +141,7 @@ export default function BridgeProgress() {
             ))}
           </div>
           <p className="text-text-secondary text-sm">
-            {route?.amount} {route?.asset} sent to {CHAINS[route?.toChain!]?.name}
+            {route?.amount} {route?.asset} bridged to {CHAINS[route?.toChain!]?.name}
           </p>
           <button
             onClick={reset}
