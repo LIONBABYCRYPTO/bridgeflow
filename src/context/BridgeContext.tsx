@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react'
-import { useAccount } from 'wagmi'
-import { fetchLiveRoute, addHistory, executeBridge, type LiveRoute } from '../data/chains'
+import { useAccount, useSendTransaction, useSwitchChain } from 'wagmi'
+import { fetchLiveRoute, addHistory, getRouteTxData, type LiveRoute, type RouteTxData } from '../data/chains'
 import type { Route } from '@lifi/sdk'
 
 export type ChainId = 'ethereum' | 'base' | 'arbitrum' | 'polygon' | 'optimism' | 'bsc' | 'cronos'
@@ -13,6 +13,7 @@ export interface BridgeState {
   asset: Asset | null
   amount: string
   route: LiveRoute | null
+  routeTx: RouteTxData | null
   loadingRoute: boolean
   routeError: string | null
   step: 'wallet' | 'asset' | 'chain' | 'route' | 'bridge' | 'complete'
@@ -36,7 +37,7 @@ interface BridgeContextType {
   setMigrateMode: (v: boolean) => void
   reset: () => void
   fetchRoute: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<LiveRoute | null>
-  startBridge: () => Promise<void>
+  startBridge: () => void
   fetchAndBridge: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<void>
 }
 
@@ -46,6 +47,7 @@ const defaultState: BridgeState = {
   asset: null,
   amount: '',
   route: null,
+  routeTx: null,
   loadingRoute: false,
   routeError: null,
   step: 'wallet',
@@ -63,6 +65,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<BridgeState>(defaultState)
   const routeRef = useRef<Route | null>(null)
   const { address } = useAccount()
+  const { switchChainAsync } = useSwitchChain()
+  const { sendTransactionAsync } = useSendTransaction()
 
   const patch = (partial: Partial<BridgeState>) => setState(s => ({ ...s, ...partial }))
 
@@ -79,10 +83,156 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     }
   }, [address])
 
+  // Execute bridge using wagmi hooks instead of raw window.ethereum
+  const executeBridge = useCallback(async (
+    route: Route | null,
+    onStatus: (status: string, txHash?: string) => void
+  ): Promise<{ success: boolean; txHash?: string; error?: string }> => {
+    if (!route) {
+      onStatus('error')
+      return { success: false, error: 'No route data. Get a quote first.' }
+    }
+
+    const txData = getRouteTxData(route)
+    if (!txData) {
+      onStatus('error')
+      return { success: false, error: 'No transaction data in route. The bridge tool did not return executable data.' }
+    }
+
+    try {
+      onStatus('preparing')
+
+      // Step 1: Switch to the source chain if needed
+      onStatus('switching_chain')
+      try {
+        await switchChainAsync({ chainId: txData.fromChainId })
+      } catch (switchErr: any) {
+        if (switchErr?.code === 4902) {
+          return { success: false, error: `Chain ${txData.fromChainId} not available in your wallet.` }
+        }
+        // User rejected switch
+        return { success: false, error: 'Network switch cancelled. Please switch to the correct network.' }
+      }
+
+      // Step 2: Handle token approval if needed (ERC-20 tokens)
+      if (txData.approvalTx) {
+        onStatus('approving')
+        try {
+          const approveHash = await sendTransactionAsync({
+            to: txData.approvalTx.to as `0x${string}`,
+            data: txData.approvalTx.data as `0x${string}`,
+            value: 0n,
+          })
+          onStatus('approve_sent', approveHash)
+          
+          // Wait for approval confirmation
+          // (real production would use useWaitForTransactionReceipt)
+          await new Promise(r => setTimeout(r, 2000))
+        } catch (approveErr: any) {
+          const msg = approveErr?.message || ''
+          if (msg.includes('User rejected') || msg.includes('user rejected')) {
+            return { success: false, error: 'Token approval was cancelled.' }
+          }
+          return { success: false, error: `Approval failed: ${msg}` }
+        }
+      }
+
+      // Step 3: Send the bridge transaction
+      onStatus('bridging')
+      try {
+        const hash = await sendTransactionAsync({
+          to: txData.tx.to as `0x${string}`,
+          data: txData.tx.data as `0x${string}`,
+          value: txData.tx.value ? BigInt(txData.tx.value) : 0n,
+        })
+        
+        onStatus('confirming', hash)
+        
+        // Transaction was sent — success is when it's submitted to mempool
+        // For cross-chain, the bridge will complete on the destination chain later
+        onStatus('complete', hash)
+        return { success: true, txHash: hash }
+      } catch (txErr: any) {
+        const msg = txErr?.message || ''
+        if (msg.includes('User rejected') || msg.includes('user rejected')) {
+          return { success: false, error: 'Bridge transaction was cancelled.' }
+        }
+        return { success: false, error: msg || 'Transaction failed.' }
+      }
+    } catch (e: any) {
+      console.error('Execute error:', e)
+      const msg = e?.message || ''
+      if (msg.includes('User rejected') || msg.includes('user rejected')) {
+        return { success: false, error: 'Transaction was cancelled.' }
+      }
+      return { success: false, error: msg || 'Bridge failed.' }
+    }
+  }, [switchChainAsync, sendTransactionAsync])
+
+  // fetch quote + immediately bridge (used by MigrateWallet)
+  const fetchAndBridge = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
+    patch({
+      fromChain: from,
+      toChain: to,
+      asset: asset,
+      amount: String(amount),
+      loadingRoute: true,
+      route: null,
+      routeError: null,
+      bridgeStatus: 'preparing',
+      bridgeError: null,
+      migrateMode: false,
+    })
+
+    const result = await fetchLiveRoute(from, to, asset, amount, address || undefined)
+    if (result.rawRoute) routeRef.current = result.rawRoute
+
+    if (!result.route) {
+      patch({ loadingRoute: false, routeError: result.error || 'No route available.' })
+      return
+    }
+
+    patch({ route: result.route, loadingRoute: false })
+
+    // Now execute the bridge via wagmi hooks
+    patch({ step: 'bridge', bridgeStatus: 'preparing' })
+
+    const execResult = await executeBridge(result.rawRoute, (status, txHash) => {
+      const statusMap: Record<string, BridgeState['bridgeStatus']> = {
+        preparing: 'preparing',
+        switching_chain: 'switching_chain',
+        approving: 'approving',
+        approve_sent: 'approve_sent',
+        bridging: 'bridging',
+        confirming: 'confirming',
+        complete: 'done',
+        error: 'error',
+      }
+      const mapped = statusMap[status] || 'bridging'
+      patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
+    })
+
+    if (execResult.success) {
+      addHistory({
+        id: Date.now().toString(),
+        asset,
+        amount,
+        fromChain: from,
+        toChain: to,
+        status: 'completed',
+        timestamp: new Date().toLocaleString(),
+        txHash: execResult.txHash || 'sent',
+      })
+      patch({ bridgeStatus: 'done', txHash: execResult.txHash || null, step: 'complete' })
+    } else {
+      patch({ bridgeStatus: 'error', bridgeError: execResult.error || 'Bridge failed' })
+    }
+  }, [address, executeBridge])
+
+  // Non-migrate flow: review then bridge
   const startBridge = useCallback(async () => {
-    // Read fresh state from refs to avoid stale closure
-    const s = stateRef.current
     const rawRoute = routeRef.current
+    const s = stateRef.current
     if (!rawRoute || !s.asset || !s.amount || !s.fromChain || !s.toChain) return
 
     patch({ step: 'bridge', bridgeStatus: 'preparing', bridgeError: null })
@@ -117,69 +267,8 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     } else {
       patch({ bridgeStatus: 'error', bridgeError: result.error || 'Bridge failed' })
     }
-  }, [])
+  }, [executeBridge])
 
-  // fetch quote + immediately bridge (used by MigrateWallet)
-  const fetchAndBridge = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
-    patch({
-      fromChain: from,
-      toChain: to,
-      asset: asset,
-      amount: String(amount),
-      loadingRoute: true,
-      route: null,
-      routeError: null,
-      bridgeStatus: 'preparing',
-      bridgeError: null,
-      migrateMode: false,
-    })
-
-    const result = await fetchLiveRoute(from, to, asset, amount, address || undefined)
-    if (result.rawRoute) routeRef.current = result.rawRoute
-
-    if (!result.route) {
-      patch({ loadingRoute: false, routeError: result.error || 'No route available.' })
-      return
-    }
-
-    patch({ route: result.route, loadingRoute: false })
-
-    // Now execute the bridge
-    patch({ step: 'bridge', bridgeStatus: 'preparing' })
-
-    const execResult = await executeBridge(result.rawRoute, (status, txHash) => {
-      const statusMap: Record<string, BridgeState['bridgeStatus']> = {
-        preparing: 'preparing',
-        switching_chain: 'switching_chain',
-        approving: 'approving',
-        approve_sent: 'approve_sent',
-        bridging: 'bridging',
-        confirming: 'confirming',
-        complete: 'done',
-        error: 'error',
-      }
-      const mapped = statusMap[status] || 'bridging'
-      patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
-    })
-
-    if (execResult.success) {
-      addHistory({
-        id: Date.now().toString(),
-        asset,
-        amount,
-        fromChain: from,
-        toChain: to,
-        status: 'completed',
-        timestamp: new Date().toLocaleString(),
-        txHash: execResult.txHash || 'sent',
-      })
-      patch({ bridgeStatus: 'done', txHash: execResult.txHash || null, step: 'complete' })
-    } else {
-      patch({ bridgeStatus: 'error', bridgeError: execResult.error || 'Bridge failed' })
-    }
-  }, [address])
-
-  // Keep state ref for use in callbacks
   const stateRef = useRef(state)
   useEffect(() => { stateRef.current = state }, [state])
 

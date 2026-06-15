@@ -1,5 +1,5 @@
-import { createClient, getQuote, getToken, executeRoute as lifiExecute, convertQuoteToRoute, ChainKey } from '@lifi/sdk'
-import type { Route } from '@lifi/sdk'
+import { createClient, getQuote, getToken, convertQuoteToRoute, ChainKey } from '@lifi/sdk'
+import type { Route, Step } from '@lifi/sdk'
 
 const client = createClient({
   integrator: 'bridgeflow',
@@ -241,162 +241,63 @@ export async function fetchWalletBalances(address: string): Promise<WalletBalanc
   }
 }
 
-export async function executeBridge(
-  route: Route | null,
-  onStatus: (status: string, txHash?: string) => void
-): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  if (!route) {
-    onStatus('error')
-    return { success: false, error: 'No route data. Get a quote first.' }
+export interface RouteTxData {
+  fromChainId: number
+  toChainId: number
+  fromToken: string
+  toToken: string
+  fromAmount: string
+  toAmountMin: string
+  tx: {
+    to: string
+    data: string
+    value: string
+  }
+  approvalTx?: {
+    to: string
+    data: string
+  }
+}
+
+/**
+ * Extract transaction data from a LI.FI Route for use with wagmi hooks.
+ * This replaces the SDK's lifiExecute which internally uses window.ethereum.
+ * Returns structured data that BridgeContext's wagmi hooks can send.
+ */
+export function getRouteTxData(route: Route | Step): RouteTxData | null {
+  const step = 'steps' in route ? route.steps?.[0] : route
+  if (!step) return null
+
+  const txRequest = step.transactionRequest as any
+  if (!txRequest?.to || !txRequest?.data) return null
+
+  const action = step.action as any
+  const estimate = step.estimate as any
+
+  const result: RouteTxData = {
+    fromChainId: action?.fromChainId || 0,
+    toChainId: action?.toChainId || 0,
+    fromToken: action?.fromToken || '',
+    toToken: action?.toToken || '',
+    fromAmount: action?.fromAmount || '0',
+    toAmountMin: estimate?.toAmountMin || '0',
+    tx: {
+      to: txRequest.to,
+      data: txRequest.data,
+      value: txRequest.value || '0x0',
+    },
   }
 
-  // Validate route structure before sending to SDK
-  if (!route.id) {
-    onStatus('error')
-    return { success: false, error: 'Route missing ID. Try fetching a new quote.' }
-  }
-  if (!route.steps || route.steps.length === 0) {
-    onStatus('error')
-    return { success: false, error: 'Route has no steps. This pair may not be supported.' }
-  }
-
-  const firstStep = route.steps[0]
-  if (!firstStep) {
-    onStatus('error')
-    return { success: false, error: 'Route step is empty.' }
-  }
-  if (!firstStep.transactionRequest) {
-    onStatus('error')
-    return { success: false, error: 'No transaction data in route. The bridge/swap tool did not return executable data.' }
+  // Check if approval is needed
+  const approvalAddress = estimate?.approvalAddress
+  if (approvalAddress) {
+    result.approvalTx = {
+      to: approvalAddress,
+      data: txRequest.data, // same data is the approve call
+    }
   }
 
-  const tx = firstStep.transactionRequest as any
-  if (!tx.to || !tx.data || tx.data === '0x') {
-    onStatus('error')
-    return { success: false, error: 'Transaction data is empty. The routing tool could not generate a valid transaction.' }
-  }
-  if (!tx.from) {
-    onStatus('error')
-    return { success: false, error: 'Transaction has no "from" address. Ensure your wallet is connected.' }
-  }
-
-  try {
-    const wallet = window.ethereum
-    if (!wallet) {
-      return { success: false, error: 'No wallet found. Please install MetaMask or use an in-app wallet.' }
-    }
-
-    onStatus('preparing')
-
-    // Verify the route action details for display
-    const action = firstStep.action
-    const toolName = (route as any).tool || firstStep.tool || 'LI.FI'
-    console.log(`Executing bridge: ${action?.fromChainId}→${action?.toChainId} via ${toolName}`)
-
-    await lifiExecute(client, route, {
-      // @ts-ignore - SDK v4 execution options types are internal
-      updateRouteHook: (updatedRoute: any) => {
-        try {
-          const execStep = updatedRoute.steps?.[0]
-          if (!execStep?.execution) return
-          const exec = execStep.execution
-          const processes = exec.process || []
-          const lastProcess = processes[processes.length - 1]
-
-          if (exec.status === 'FAILED') {
-            onStatus('error')
-            // Log the failure reason for debugging
-            processes.map((p: any) => p.error?.message || '').filter(Boolean).forEach((m: string) => console.error('Step process error:', m))
-            return
-          }
-
-          if (lastProcess) {
-            switch (lastProcess.type) {
-              case 'TOKEN_ALLOWANCE':
-              case 'TOKEN_APPROVAL':
-                onStatus(lastProcess.status === 'DONE' ? 'approve_sent' : 'approving', lastProcess.txHash)
-                break
-              case 'SWAP':
-              case 'CROSS_CHAIN':
-              case 'RECEIVED_CHAIN':
-                onStatus(lastProcess.status === 'DONE' ? 'confirming' : 'bridging', lastProcess.txHash)
-                break
-              default:
-                if (lastProcess.status === 'DONE') {
-                  onStatus('confirming', lastProcess.txHash)
-                }
-            }
-          }
-
-          if (exec.status === 'DONE') {
-            const txHash = processes.find((p: any) => p.txHash)?.txHash
-            onStatus('complete', txHash)
-          }
-        } catch (hookErr: any) {
-          console.error('updateRouteHook error:', hookErr)
-        }
-      },
-      // @ts-ignore - SDK v4 execution options types are internal
-      switchChainHook: async (requiredChainId: any) => {
-        try {
-          onStatus('switching_chain')
-          const resp = await wallet.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: '0x' + Number(requiredChainId).toString(16) }],
-          })
-          return resp
-        } catch (switchErr: any) {
-          if (switchErr.code === 4902) {
-            throw new Error(`Chain ${requiredChainId} is not available in your wallet. Please add it first.`)
-          }
-          if (switchErr.code === -32002) {
-            throw new Error('Wallet is already processing a request. Please check your wallet extension.')
-          }
-          throw new Error('Network switch cancelled or failed.')
-        }
-      },
-    })
-
-    return { success: true }
-  } catch (e: any) {
-    console.error('Execute error:', e)
-    const msg = e?.message || ''
-
-    // User rejection
-    if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('DENIED') || msg.includes('ACTION_REJECTED')) {
-      return { success: false, error: 'Transaction was cancelled in your wallet.' }
-    }
-
-    // RPC errors
-    if (msg.includes('insufficient funds') || msg.includes('insufficient balance')) {
-      return { success: false, error: 'Insufficient funds to cover gas fees. Add ETH to your wallet for gas.' }
-    }
-    if (msg.includes('gas required exceeds allowance') || msg.includes('intrinsic gas too low')) {
-      return { success: false, error: 'Gas estimation failed. The transaction may be too complex or your balance too low.' }
-    }
-    if (msg.includes('nonce too low')) {
-      return { success: false, error: 'Transaction nonce error. Try again or reset your wallet activity.' }
-    }
-    if (msg.includes('execution reverted') || msg.includes('revert')) {
-      return { success: false, error: 'Transaction was reverted on-chain. This could mean insufficient balance, expired approval, or a contract error.' }
-    }
-    if (msg.includes('Internal JSON-RPC')) {
-      return { success: false, error: 'Wallet RPC error. Try switching RPC provider or try again.' }
-    }
-    if (msg.includes('Network error') || msg.includes('Failed to fetch')) {
-      return { success: false, error: 'Network error. Check your internet connection and try again.' }
-    }
-
-    // SDK internal errors
-    if (msg.includes('Cannot read properties of undefined') || msg.includes('is not a function') || msg.includes('is not defined')) {
-      return { success: false, error: 'Internal error in the bridge SDK. The route format may be incorrect. Try getting a fresh quote.' }
-    }
-    if (msg.includes('aborted') || msg.includes('timeout')) {
-      return { success: false, error: 'Request timed out. The bridge provider may be slow. Try again.' }
-    }
-
-    return { success: false, error: msg || 'Bridge failed. See browser console for details.' }
-  }
+  return result
 }
 
 export interface HistoryItem {
