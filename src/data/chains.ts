@@ -34,6 +34,17 @@ export const ASSETS = [
 ]
 
 export type AssetSymbol = 'USDC' | 'USDT' | 'ETH' | 'BTC' | 'CRO'
+export type ChainId = 'ethereum' | 'base' | 'arbitrum' | 'polygon' | 'optimism' | 'bsc' | 'cronos'
+
+export interface WalletBalance {
+  asset: AssetSymbol
+  amount: number
+  chain: ChainId
+  usdValue: number
+  tokenAddress: string
+  decimals: number
+  logoURI: string
+}
 
 export interface LiveRoute {
   fromChain: string
@@ -174,6 +185,43 @@ export async function fetchLiveRoute(
     const msg = e?.message || 'Quote failed'
     console.warn('LI.FI quote failed:', msg)
     return { route: null, rawRoute: null, error: msg }
+  }
+}
+
+export async function fetchWalletBalances(address: string): Promise<WalletBalance[]> {
+  try {
+    const { getWalletBalances } = await import('@lifi/sdk')
+    const result = await getWalletBalances(client, address)
+    const balances: WalletBalance[] = []
+    const chainReverseMap: Record<number, string> = {}
+    for (const [key, info] of Object.entries(CHAINS)) {
+      chainReverseMap[info.id] = key
+    }
+    for (const [chainIdStr, tokens] of Object.entries(result)) {
+      const chainId = parseInt(chainIdStr)
+      const chainKey = chainReverseMap[chainId]
+      if (!chainKey || !Array.isArray(tokens)) continue
+      for (const t of tokens as any[]) {
+        const symbol = (t.symbol || '').toUpperCase()
+        if (!['USDC', 'USDT', 'ETH', 'BTC', 'CRO'].includes(symbol)) continue
+        const amount = parseFloat(t.amount || '0')
+        if (amount <= 0) continue
+        const priceUSD = parseFloat(t.priceUSD || '0')
+        balances.push({
+          asset: symbol as AssetSymbol,
+          amount,
+          chain: chainKey as ChainId,
+          usdValue: amount * priceUSD,
+          tokenAddress: t.address || '',
+          decimals: t.decimals || 18,
+          logoURI: t.logoURI || '',
+        })
+      }
+    }
+    return balances
+  } catch (e) {
+    console.warn('Failed to fetch wallet balances:', e)
+    return []
   }
 }
 
