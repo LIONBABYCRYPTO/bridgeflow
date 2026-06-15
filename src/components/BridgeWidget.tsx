@@ -9,10 +9,11 @@ import NaturalInput from './NaturalInput'
 import MigrateWallet from './MigrateWallet'
 
 export default function BridgeWidget() {
-  const { state, setStep, setAsset, setAmount, setFromChain, setToChain, setShowNaturalInput, setMigrateMode, fetchRoute } = useBridge()
+  const { state, setStep, setAsset, setAmount, setFromChain, setToChain, setShowNaturalInput, setMigrateMode, fetchRoute, startBridge } = useBridge()
 
   const handleBridge = () => {
     setStep('bridge')
+    startBridge()
   }
 
   const handleNaturalParse = (text: string) => {

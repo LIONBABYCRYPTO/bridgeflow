@@ -1,22 +1,10 @@
 import type { ReactNode } from 'react'
-import { createContext, useContext, useState, useCallback } from 'react'
-import { fetchLiveRoute, addHistory, type LiveRoute } from '../data/chains'
+import { createContext, useContext, useState, useCallback, useRef } from 'react'
+import { fetchLiveRoute, addHistory, executeRoute, type LiveRoute } from '../data/chains'
 
 export type ChainId = 'ethereum' | 'base' | 'arbitrum' | 'polygon' | 'optimism' | 'bsc' | 'cronos'
 
 export type Asset = 'USDC' | 'USDT' | 'ETH' | 'BTC' | 'CRO'
-
-export interface BridgeRoute {
-  fromChain: ChainId
-  toChain: ChainId
-  asset: Asset
-  amount: number
-  estimatedReceive: number
-  estimatedTime: string
-  networkFee: number
-  bridgeFee: number
-  safetyScore: number
-}
 
 export interface BridgeState {
   fromChain: ChainId | null
@@ -29,7 +17,10 @@ export interface BridgeState {
   showNaturalInput: boolean
   naturalInput: string
   migrateMode: boolean
-  migrationPlan: BridgeRoute[]
+  migrationPlan: any[]
+  bridgeStatus: 'idle' | 'approving' | 'approve_tx' | 'bridging' | 'bridge_tx' | 'confirming' | 'done' | 'error'
+  bridgeError: string | null
+  txHash: string | null
 }
 
 interface BridgeContextType {
@@ -45,7 +36,7 @@ interface BridgeContextType {
   setMigrateMode: (v: boolean) => void
   reset: () => void
   fetchRoute: (from: ChainId, to: ChainId, asset: Asset, amount: number) => Promise<void>
-  completeBridge: () => void
+  startBridge: () => Promise<void>
 }
 
 const defaultState: BridgeState = {
@@ -60,34 +51,66 @@ const defaultState: BridgeState = {
   naturalInput: '',
   migrateMode: false,
   migrationPlan: [],
+  bridgeStatus: 'idle',
+  bridgeError: null,
+  txHash: null,
 }
 
 const BridgeContext = createContext<BridgeContextType | null>(null)
 
 export function BridgeProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<BridgeState>(defaultState)
+  const routeRef = useRef<any>(null)
 
   const patch = (partial: Partial<BridgeState>) => setState(s => ({ ...s, ...partial }))
 
   const fetchRoute = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
     patch({ loadingRoute: true, route: null })
-    const route = await fetchLiveRoute(from, to, asset, amount)
+    const { route, rawRoute } = await fetchLiveRoute(from, to, asset, amount)
+    if (rawRoute) routeRef.current = rawRoute
     patch({ route, loadingRoute: false, step: 'route' })
   }, [])
 
-  const completeBridge = useCallback(() => {
+  const startBridge = useCallback(async () => {
     const s = state
-    if (s.route && s.asset && s.amount) {
-      addHistory({
-        id: Date.now().toString(),
-        asset: s.asset,
-        amount: parseFloat(s.amount) || 0,
-        fromChain: s.fromChain || 'unknown',
-        toChain: s.toChain || 'unknown',
-        status: 'completed',
-        timestamp: new Date().toLocaleString(),
-        txHash: '0x' + Math.random().toString(16).slice(2, 10) + '...' + Math.random().toString(16).slice(2, 6),
+    if (!s.route || !s.asset || !s.amount || !s.fromChain || !s.toChain) return
+
+    patch({ bridgeStatus: 'approving' })
+
+    try {
+      const result = await executeRoute(routeRef.current, (status: string, txHash?: string) => {
+        switch (status) {
+          case 'approve':
+            patch({ bridgeStatus: 'approve_tx' })
+            break
+          case 'approve_sent':
+            patch({ bridgeStatus: 'bridging' })
+            break
+          case 'bridge':
+            patch({ bridgeStatus: 'bridge_tx' })
+            break
+          case 'complete':
+            patch({ bridgeStatus: 'done', txHash: txHash || null, step: 'complete' })
+            break
+        }
       })
+
+      if (result.success) {
+        addHistory({
+          id: Date.now().toString(),
+          asset: s.asset!,
+          amount: parseFloat(s.amount) || 0,
+          fromChain: s.fromChain!,
+          toChain: s.toChain!,
+          status: 'completed',
+          timestamp: new Date().toLocaleString(),
+          txHash: result.txHash || '0x' + Math.random().toString(16).slice(2, 10),
+        })
+      } else {
+        patch({ bridgeStatus: 'error', bridgeError: result.error || 'Bridge failed' })
+      }
+    } catch (e: any) {
+      patch({ bridgeStatus: 'error', bridgeError: e?.message || 'Unknown error' })
     }
   }, [state])
 
@@ -103,9 +126,9 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       setShowNaturalInput: (v) => patch({ showNaturalInput: v }),
       setNaturalInput: (v) => patch({ naturalInput: v }),
       setMigrateMode: (v) => patch({ migrateMode: v }),
-      reset: () => setState(defaultState),
+      reset: () => { setState(defaultState); routeRef.current = null },
       fetchRoute,
-      completeBridge,
+      startBridge,
     }}>
       {children}
     </BridgeContext.Provider>
