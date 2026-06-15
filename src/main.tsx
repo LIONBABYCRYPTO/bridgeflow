@@ -10,7 +10,7 @@ import App from './App'
 
 const config = getDefaultConfig({
   appName: 'BridgeFlow',
-  projectId: 'YOUR_WALLETCONNECT_PROJECT_ID',
+  projectId: 'a3abf285ac33ce453f0e1fd4db00a237',
   chains: [mainnet, base, arbitrum, polygon, optimism, bsc, cronos],
   transports: {
     [mainnet.id]: http(),
