@@ -188,6 +188,18 @@ export async function fetchLiveRoute(
   }
 }
 
+const CHAIN_IDS_BY_KEY: Record<string, number> = {}
+for (const [key, info] of Object.entries(CHAINS)) {
+  CHAIN_IDS_BY_KEY[key] = info.id
+}
+
+function getDefaultDecimals(symbol: string): number {
+  for (const a of ASSETS) {
+    if (a.symbol === symbol) return a.decimals
+  }
+  return 18
+}
+
 export async function fetchWalletBalances(address: string): Promise<WalletBalance[]> {
   try {
     const { getWalletBalances } = await import('@lifi/sdk')
@@ -204,14 +216,18 @@ export async function fetchWalletBalances(address: string): Promise<WalletBalanc
       for (const t of tokens as any[]) {
         const symbol = (t.symbol || '').toUpperCase()
         if (!['USDC', 'USDT', 'ETH', 'BTC', 'CRO'].includes(symbol)) continue
-        const amount = parseFloat(t.amount || '0')
-        if (amount <= 0) continue
+        const decimals = t.decimals ?? getDefaultDecimals(symbol)
+        // LI.FI returns amounts in smallest unit (raw), convert to human-readable
+        const rawAmount = BigInt(t.amount || '0')
+        const divisor = 10n ** BigInt(decimals)
+        const wholeAmt = Number(rawAmount / divisor) + Number(rawAmount % divisor) / Math.pow(10, decimals)
+        if (wholeAmt <= 0) continue
         const priceUSD = parseFloat(t.priceUSD || '0')
         balances.push({
           asset: symbol as AssetSymbol,
-          amount,
+          amount: wholeAmt,
           chain: chainKey as ChainId,
-          usdValue: amount * priceUSD,
+          usdValue: wholeAmt * priceUSD,
           tokenAddress: t.address || '',
           decimals: t.decimals || 18,
           logoURI: t.logoURI || '',
