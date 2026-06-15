@@ -6,12 +6,12 @@ export default function BridgeProgress() {
   const { state, reset } = useBridge()
   const { route, bridgeStatus, bridgeError, txHash } = state
 
-  const getCurrentStep = () => {
+  const getStepIndex = () => {
     switch (bridgeStatus) {
       case 'approving': return 0
-      case 'approve_tx': return 1
+      case 'approve_sent': return 1
       case 'bridging': return 2
-      case 'bridge_tx': return 3
+      case 'confirming': return 3
       case 'done': return 4
       case 'error': return -1
       default: return 0
@@ -19,14 +19,14 @@ export default function BridgeProgress() {
   }
 
   const STEPS = [
-    { label: 'Approving Token', icon: '⚙️' },
-    { label: 'Approval Sent', icon: '✓' },
-    { label: 'Bridging', icon: '⟁' },
-    { label: 'Confirming', icon: '🔍' },
-    { label: 'Completed', icon: '🎉' },
+    { label: 'Approve Token', desc: 'Authorize the bridge to use your tokens' },
+    { label: 'Approval Sent', desc: 'Waiting for approval to confirm' },
+    { label: 'Sending', desc: 'Bridging your asset to destination chain' },
+    { label: 'Confirming', desc: 'Waiting for on-chain confirmation' },
+    { label: 'Done!', desc: 'Your assets have arrived' },
   ]
 
-  const currentStep = getCurrentStep()
+  const currentStep = getStepIndex()
   const isComplete = bridgeStatus === 'done'
   const isError = bridgeStatus === 'error'
 
@@ -45,87 +45,92 @@ export default function BridgeProgress() {
         </p>
       </div>
 
-      {txHash && (
+      {txHash && bridgeStatus !== 'error' && (
         <div className="text-center">
+          <span className="text-xs text-text-secondary font-mono truncate block max-w-[200px] mx-auto">
+            {txHash.slice(0, 10)}...{txHash.slice(-6)}
+          </span>
           <a
             href={`https://etherscan.io/tx/${txHash}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs text-accent hover:underline"
+            className="text-xs text-accent hover:underline mt-1 inline-block"
           >
-            View on Etherscan ↗
+            View on Explorer ↗
           </a>
         </div>
       )}
 
       {/* Progress timeline */}
-      <div className="relative px-2">
+      <div className="px-2">
         {STEPS.map((step, i) => {
           const done = i < currentStep
           const active = i === currentStep
+          const failed = isError && i === currentStep
+
           return (
-            <div key={i} className="flex items-start gap-4 mb-6 last:mb-0">
+            <div key={i} className="flex items-start gap-4 mb-6 last:mb-0 relative">
               <motion.div
-                animate={{
-                  scale: active ? [1, 1.2, 1] : 1,
-                }}
+                animate={{ scale: active ? [1, 1.2, 1] : 1 }}
                 transition={{ duration: 0.3 }}
-                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 z-10"
                 style={{
-                  backgroundColor: done ? '#34c759' : isError ? '#ff3b30' : active ? '#0071e3' : '#e5e5ea',
-                  color: done || active || isError ? 'white' : '#86868b',
+                  backgroundColor: done ? '#34c759' : failed ? '#ff3b30' : active ? '#0071e3' : '#e5e5ea',
+                  color: done || active || failed ? 'white' : '#86868b',
                 }}
               >
-                {done ? '✓' : isError && i === currentStep ? '✕' : active ? step.icon : i + 1}
+                {done ? '✓' : failed ? '✕' : active ? '●' : i + 1}
               </motion.div>
 
               {i < STEPS.length - 1 && (
-                <div className="absolute left-[14px] top-8 w-0.5 h-6 -translate-x-1/2">
-                  <div
-                    className="h-full w-full rounded-full transition-all duration-500"
-                    style={{ backgroundColor: done ? '#34c759' : '#e5e5ea' }}
-                  />
-                </div>
+                <div
+                  className="absolute left-[14px] top-8 w-0.5 h-6 -translate-x-1/2 z-0"
+                  style={{
+                    background: done
+                      ? '#34c759'
+                      : 'linear-gradient(to bottom, #0071e3, #e5e5ea)',
+                  }}
+                />
               )}
 
-              <div className="pt-1.5">
+              <div className="pt-1.5 flex-1 min-w-0">
                 <span
                   className="text-sm font-medium transition-colors duration-300"
-                  style={{
-                    color: done ? '#34c759' : isError && i === currentStep ? '#ff3b30' : active ? '#0071e3' : '#86868b',
-                  }}
+                  style={{ color: done ? '#34c759' : failed ? '#ff3b30' : active ? '#0071e3' : '#86868b' }}
                 >
                   {step.label}
                 </span>
-                {active && !done && (
-                  <motion.span
-                    animate={{ opacity: [1, 0.3, 1] }}
-                    transition={{ duration: 1.5, repeat: Infinity }}
-                    className="ml-2 text-xs text-text-tertiary"
-                  >
-                    processing...
-                  </motion.span>
-                )}
+                <p className="text-xs text-text-tertiary mt-0.5">{step.desc}</p>
               </div>
+
+              {active && !done && !failed && (
+                <motion.div className="pt-2 shrink-0">
+                  <motion.div
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                    className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full"
+                  />
+                </motion.div>
+              )}
             </div>
           )
         })}
       </div>
 
-      {/* Error state */}
       {isError && (
         <div className="text-center space-y-3">
-          <p className="text-sm text-danger">{bridgeError || 'Something went wrong'}</p>
-          <button
-            onClick={reset}
-            className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
-          >
-            Try Again
-          </button>
+          <p className="text-sm text-danger px-4">{bridgeError || 'Something went wrong'}</p>
+          <div className="flex gap-3 justify-center">
+            <button
+              onClick={reset}
+              className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
+            >
+              Try Again
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Complete action */}
       {isComplete && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
@@ -144,19 +149,15 @@ export default function BridgeProgress() {
               </motion.span>
             ))}
           </div>
-
           <p className="text-text-secondary text-sm">
-            Your {route?.asset} has arrived on {CHAINS[route?.toChain!]?.name}
+            {route?.amount} {route?.asset} sent to {CHAINS[route?.toChain!]?.name}
           </p>
-
-          <div className="flex gap-3 justify-center pt-3">
-            <button
-              onClick={reset}
-              className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
-            >
-              Bridge Again
-            </button>
-          </div>
+          <button
+            onClick={reset}
+            className="px-6 py-3 rounded-xl bg-accent text-white font-semibold text-sm hover:bg-accent-hover transition-all cursor-pointer"
+          >
+            Bridge Again
+          </button>
         </motion.div>
       )}
     </motion.div>

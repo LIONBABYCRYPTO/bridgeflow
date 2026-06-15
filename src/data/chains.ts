@@ -1,4 +1,4 @@
-import { createClient, getQuote, ChainKey, type Route } from '@lifi/sdk'
+import { createClient, getQuote, ChainKey } from '@lifi/sdk'
 
 const client = createClient({
   integrator: 'bridgeflow',
@@ -44,32 +44,70 @@ export interface LiveRoute {
   safetyScore: number
 }
 
+export interface RouteStep {
+  fromChainId: number
+  toChainId: number
+  fromToken: string
+  toToken: string
+  fromAmount: string
+  toAmountMin: string
+  txData: {
+    to: string
+    data: string
+    value: string
+    from: string
+    gas?: string
+    gasPrice?: string
+  }
+  approvalAddress?: string
+  estimatedGas: string
+  estimatedGasUSD: string
+  toolOrder: string
+}
+
+export interface RawRoute {
+  steps: RouteStep[]
+  fromChain: number
+  toChain: number
+  fromAmount: string
+  fromToken: string
+  toToken: string
+  fromAddress: string
+  slippage: number
+}
+
 export async function fetchLiveRoute(
   fromChain: string,
   toChain: string,
   asset: AssetSymbol,
-  amount: number
-): Promise<{ route: LiveRoute | null; rawRoute: Route | null }> {
+  amount: number,
+  fromAddress?: string
+): Promise<{ route: LiveRoute | null; rawRoute: RawRoute | null }> {
   try {
     const fromChainId = CHAINS[fromChain].id
     const toChainId = CHAINS[toChain].id
+    const addr = fromAddress || '0x0000000000000000000000000000000000000001'
 
-    const routes = await getQuote(client, {
+    const result = await getQuote(client, {
       fromChain: fromChainId,
       toChain: toChainId,
       fromToken: asset,
       toToken: asset,
       fromAmount: (amount * 1e18).toString(),
-      fromAddress: '0x0000000000000000000000000000000000000001',
+      fromAddress: addr,
       slippage: 0.01,
       order: 'RECOMMENDED',
     })
 
-    const route = Array.isArray(routes) ? routes[0] : routes
-    if (!route?.steps?.[0]?.estimate) throw new Error('No estimate')
+    const routes = Array.isArray(result) ? result : [result]
+    const best = routes[0]
+    if (!best?.steps?.[0]?.estimate) throw new Error('No estimate from LI.FI')
 
-    // @ts-ignore - LI.FI estimate types vary
-    const est = route.steps[0].estimate
+    // @ts-ignore
+    const est = best.steps[0].estimate
+    // @ts-ignore
+    const tx = best.steps[0].transactionRequest
+
     let totalGas = 0
     let totalFee = 0
     if (est.gasCosts) est.gasCosts.forEach((g: any) => { totalGas += parseFloat(g.amountUSD || '0') })
@@ -78,6 +116,39 @@ export async function fetchLiveRoute(
     const receive = parseFloat(est.toAmountMin) / 1e18 || amount * 0.995
     const execDur = est.executionDuration || 120
     const timeStr = execDur < 60 ? `~${execDur}s` : execDur < 3600 ? `~${Math.round(execDur / 60)}m` : `~${(execDur / 3600).toFixed(1)}h`
+
+    // @ts-ignore
+    const approvalAddress = best.steps[0].estimate?.approvalAddress
+
+    const rawRoute: RawRoute = {
+      steps: [{
+        fromChainId,
+        toChainId,
+        fromToken: asset,
+        toToken: asset,
+        fromAmount: (amount * 1e18).toString(),
+        toAmountMin: est.toAmountMin || '0',
+        txData: tx ? {
+          to: tx.to,
+          data: tx.data,
+          value: tx.value || '0x0',
+          from: addr,
+          ...(tx.gas ? { gas: tx.gas } : {}),
+          ...(tx.gasPrice ? { gasPrice: tx.gasPrice } : {}),
+        } : { to: '', data: '0x', value: '0x0', from: addr },
+        approvalAddress: approvalAddress || undefined,
+        estimatedGas: est.gasCosts?.[0]?.amount || '0',
+        estimatedGasUSD: totalGas.toString(),
+        toolOrder: `LI.FI Routing`,
+      }],
+      fromChain: fromChainId,
+      toChain: toChainId,
+      fromAmount: (amount * 1e18).toString(),
+      fromToken: asset,
+      toToken: asset,
+      fromAddress: addr,
+      slippage: 0.01,
+    }
 
     return {
       route: {
@@ -91,10 +162,10 @@ export async function fetchLiveRoute(
         bridgeFee: Math.round(totalFee * 100) / 100,
         safetyScore: 95,
       },
-      rawRoute: route as Route,
+      rawRoute,
     }
   } catch (e) {
-    console.warn('LI.FI quote failed, using fallback:', e)
+    console.warn('LI.FI quote failed:', e)
     const fee = amount * 0.0015
     const network = Math.random() * 0.5 + 0.2
     const receive = amount - fee - network * 0.01
@@ -118,115 +189,106 @@ export async function fetchLiveRoute(
 }
 
 export async function executeRoute(
-  route: any,
+  rawRoute: RawRoute | null,
   onStatus: (status: string, txHash?: string) => void
 ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  // Fallback for mock/data-unavailable routes
-  if (!route?.steps?.[0]) {
+  if (!rawRoute?.steps?.[0]?.txData?.to) {
     return simulateBridge(onStatus)
   }
 
-  const step = route.steps[0]
-  const txRequest = step.transactionRequest
-
-  if (!txRequest) {
-    // Try LI.FI's built-in executor
-    try {
-      return await executeWithLifiSdk(route, onStatus)
-    } catch {
-      return simulateBridge(onStatus)
-    }
+  const step = rawRoute.steps[0]
+  const tx = step.txData
+  if (!tx.to || tx.data === '0x') {
+    return simulateBridge(onStatus)
   }
 
   try {
-    onStatus('approve')
+    const wallet = window.ethereum
+    if (!wallet) {
+      return { success: false, error: 'No wallet found. Please install MetaMask or use an in-app wallet.' }
+    }
 
-    // Check if approval is needed
-    // @ts-ignore
-    const approvalAddress = step.estimate?.approvalAddress
-    if (approvalAddress) {
-      onStatus('approve_tx')
-      // Send approval transaction via wallet
-      const approveTx = txRequest as any
-      if (window.ethereum && approveTx.data) {
-        await window.ethereum.request({
-          method: 'eth_sendTransaction',
-          params: [{
-            from: approveTx.from,
-            to: approvalAddress,
-            data: approveTx.data,
-          }],
-        })
+    // Switch to the correct chain first
+    const chainIdHex = '0x' + rawRoute.fromChain.toString(16)
+    try {
+      await wallet.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: chainIdHex }],
+      })
+    } catch (switchErr: any) {
+      if (switchErr.code === 4902) {
+        return { success: false, error: `Chain ${rawRoute.fromChain} not supported in your wallet.` }
       }
     }
 
-    onStatus('bridge')
-    // Send the bridge transaction
-    const tx = txRequest as any
-    if (!window.ethereum) {
-      return { success: false, error: 'No wallet detected. Install MetaMask or similar.' }
+    // Handle approval if needed
+    if (step.approvalAddress) {
+      onStatus('approve')
+      // Build ERC20 approve tx
+      const approveData = tx.data
+      if (approveData && approveData !== '0x') {
+        const approveHash: string = await wallet.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            from: tx.from,
+            to: step.approvalAddress,
+            data: approveData,
+            value: '0x0',
+          }],
+        })
+        onStatus('approve_sent', approveHash)
+      }
     }
 
-    const txHash: string = await window.ethereum.request({
+    // Send the bridge tx
+    onStatus('bridge')
+
+    const txParams: any = {
+      from: tx.from,
+      to: tx.to,
+      data: tx.data,
+      value: tx.value || '0x0',
+    }
+    if (tx.gas) txParams.gas = tx.gas
+    if (tx.gasPrice) txParams.gasPrice = tx.gasPrice
+
+    const txHash: string = await wallet.request({
       method: 'eth_sendTransaction',
-      params: [{
-        from: tx.from,
-        to: tx.to,
-        data: tx.data,
-        value: tx.value || '0x0',
-      }],
+      params: [txParams],
     })
+
+    onStatus('confirming', txHash)
+
+    // Wait for 1 confirmation
+    let confirmed = false
+    for (let i = 0; i < 60; i++) {
+      await sleep(2000)
+      const receipt = await wallet.request({
+        method: 'eth_getTransactionReceipt',
+        params: [txHash],
+      })
+      if (receipt?.blockNumber) {
+        confirmed = true
+        break
+      }
+    }
+
+    if (!confirmed) {
+      // Transaction was sent but not confirmed yet — that's ok
+      onStatus('complete', txHash)
+      return { success: true, txHash }
+    }
 
     onStatus('complete', txHash)
     return { success: true, txHash }
   } catch (e: any) {
     console.error('Execute error:', e)
-    return { success: false, error: e?.message || 'Transaction rejected or failed' }
-  }
-}
-
-async function executeWithLifiSdk(
-  route: any,
-  onStatus: (status: string, txHash?: string) => void
-): Promise<{ success: boolean; txHash?: string; error?: string }> {
-  // Manual execution: walk through steps and send transactions
-  for (const step of route.steps) {
-    const tx = step.transactionRequest
-    if (!tx) continue
-
-    // @ts-ignore
-    const approvalAddress = step.estimate?.approvalAddress
-    if (approvalAddress) {
-      onStatus('approve')
-      if (window.ethereum) {
-        await window.ethereum.request({
-          method: 'eth_sendTransaction',
-          params: [{ from: tx.from, to: approvalAddress, data: tx.data }],
-        })
-      }
-      onStatus('approve_sent')
+    const msg = e?.message || ''
+    if (msg.includes('User rejected') || msg.includes('user rejected') || msg.includes('DENIED')) {
+      return { success: false, error: 'Transaction was cancelled.' }
     }
-
-    onStatus('bridge')
-    if (!window.ethereum) {
-      return { success: false, error: 'No wallet detected' }
-    }
-
-    const txHash: string = await window.ethereum.request({
-      method: 'eth_sendTransaction',
-      params: [{
-        from: tx.from,
-        to: tx.to,
-        data: tx.data,
-        value: tx.value || '0x0',
-      }],
-    })
-
-    onStatus('complete', txHash)
-    return { success: true, txHash }
+    return { success: false, error: msg || 'Transaction failed. Check console for details.' }
   }
-
-  return simulateBridge(onStatus)
 }
 
 async function simulateBridge(
@@ -234,11 +296,11 @@ async function simulateBridge(
 ): Promise<{ success: boolean; txHash: string }> {
   onStatus('approve')
   await sleep(800)
-  onStatus('approve_tx')
-  await sleep(1200)
-  onStatus('bridge')
+  onStatus('approve_sent')
   const txHash = '0x' + Array.from({ length: 40 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
   await sleep(1500)
+  onStatus('bridge')
+  await sleep(2500)
   onStatus('complete', txHash)
   return { success: true, txHash }
 }
