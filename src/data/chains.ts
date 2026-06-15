@@ -1,4 +1,4 @@
-import { createClient, getQuote, getToken, executeRoute as lifiExecute, ChainKey } from '@lifi/sdk'
+import { createClient, getQuote, getToken, executeRoute as lifiExecute, convertQuoteToRoute, ChainKey } from '@lifi/sdk'
 import type { Route } from '@lifi/sdk'
 
 const client = createClient({
@@ -149,13 +149,13 @@ export async function fetchLiveRoute(
       order: 'RECOMMENDED',
     })
 
-    const routes = Array.isArray(result) ? result : [result]
-    const best = routes[0]
-    if (!best?.steps?.[0]?.estimate) throw new Error('No route found — this pair may not be supported.')
-
-    const route = best as Route
-    // @ts-ignore
-    const est = best.steps[0].estimate
+    // SDK v4 getQuote returns a Step, not a Route
+    // Use convertQuoteToRoute to get a proper Route object
+    if (!result?.estimate) throw new Error('No route found — this pair may not be supported.')
+    
+    const fullRoute = convertQuoteToRoute(result)
+    // @ts-ignore - SDK v4 types
+    const est = result.estimate
 
     let totalGas = 0
     let totalFee = 0
@@ -179,7 +179,7 @@ export async function fetchLiveRoute(
         bridgeFee: Math.round(totalFee * 100) / 100,
         safetyScore: 95,
       },
-      rawRoute: route as Route,
+      rawRoute: fullRoute,
     }
   } catch (e: any) {
     const msg = e?.message || 'Quote failed'
