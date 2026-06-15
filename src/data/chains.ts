@@ -279,10 +279,6 @@ export async function executeBridge(
     onStatus('error')
     return { success: false, error: 'Transaction has no "from" address. Ensure your wallet is connected.' }
   }
-  if (tx.from !== (window.ethereum as any)?.selectedAddress) {
-    onStatus('error')
-    return { success: false, error: `Route was built for address ${tx.from.slice(0,6)}...${tx.from.slice(-4)} but your wallet is different. Please reconnect.` }
-  }
 
   try {
     const wallet = window.ethereum
