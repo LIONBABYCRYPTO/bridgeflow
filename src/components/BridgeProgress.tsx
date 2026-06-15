@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { useState, useEffect } from 'react'
 import { useBridge } from '../context/BridgeContext'
 import { CHAINS } from '../data/chains'
+
 const STEPS = [
   { label: 'Preparing', icon: '⚙️' },
   { label: 'Approving', icon: '✓' },
@@ -11,7 +12,7 @@ const STEPS = [
 ]
 
 export default function BridgeProgress() {
-  const { state, reset } = useBridge()
+  const { state, reset, completeBridge } = useBridge()
   const [currentStep, setCurrentStep] = useState(0)
   const route = state.route
 
@@ -21,6 +22,7 @@ export default function BridgeProgress() {
       setCurrentStep(prev => {
         if (prev >= STEPS.length - 1) {
           clearInterval(interval)
+          completeBridge()
           return prev
         }
         return prev + 1
@@ -53,24 +55,20 @@ export default function BridgeProgress() {
           const active = i === currentStep
           return (
             <div key={i} className="flex items-start gap-4 mb-6 last:mb-0">
-              {/* Step indicator */}
               <motion.div
                 animate={{
                   scale: active ? [1, 1.2, 1] : 1,
-                  backgroundColor: done ? '#34c759' : active ? '#0071e3' : '#e5e5ea',
                 }}
                 transition={{ duration: 0.3 }}
                 className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0"
                 style={{
-                  backgroundColor: done ? '#34c759' : active ? '#0071e3' : '',
-                  background: !done && !active ? '#e5e5ea' : undefined,
+                  backgroundColor: done ? '#34c759' : active ? '#0071e3' : '#e5e5ea',
                   color: done || active ? 'white' : '#86868b',
                 }}
               >
                 {done ? '✓' : active ? step.icon : i + 1}
               </motion.div>
 
-              {/* Connector line */}
               {i < STEPS.length - 1 && (
                 <div className="absolute left-[14px] top-8 w-0.5 h-6 -translate-x-1/2">
                   <div
@@ -80,7 +78,6 @@ export default function BridgeProgress() {
                 </div>
               )}
 
-              {/* Label */}
               <div className="pt-1.5">
                 <span
                   className="text-sm font-medium transition-colors duration-300"
@@ -112,7 +109,6 @@ export default function BridgeProgress() {
           animate={{ opacity: 1, y: 0 }}
           className="text-center space-y-3"
         >
-          {/* Confetti burst */}
           <div className="flex justify-center gap-1 text-2xl">
             {['🎉', '✨', '🎊', '🌟', '✨'].map((e, i) => (
               <motion.span

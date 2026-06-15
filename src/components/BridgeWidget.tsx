@@ -1,18 +1,18 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useBridge, type ChainId, type Asset } from '../context/BridgeContext'
-import { CHAINS, estimateRoute } from '../data/chains'
+import { CHAINS } from '../data/chains'
 import AssetSelect from './AssetSelect'
 import ChainSelect from './ChainSelect'
 import RouteSummary from './RouteSummary'
 import BridgeProgress from './BridgeProgress'
 import NaturalInput from './NaturalInput'
+import MigrateWallet from './MigrateWallet'
 
 export default function BridgeWidget() {
-  const { state, setStep, setAsset, setAmount, setFromChain, setToChain, setRoute, setShowNaturalInput, setMigrateMode } = useBridge()
+  const { state, setStep, setAsset, setAmount, setFromChain, setToChain, setShowNaturalInput, setMigrateMode, fetchRoute } = useBridge()
 
   const handleBridge = () => {
     setStep('bridge')
-    setTimeout(() => setStep('complete'), 4000)
   }
 
   const handleNaturalParse = (text: string) => {
@@ -30,15 +30,7 @@ export default function BridgeWidget() {
         setAmount(amount)
         setFromChain(fromChain)
         setToChain(toChain)
-        const route = estimateRoute(fromChain, toChain, asset, parseFloat(amount))
-        setRoute({
-          fromChain,
-          toChain,
-          asset,
-          amount: parseFloat(amount),
-          ...route,
-        })
-        setStep('route')
+        fetchRoute(fromChain, toChain, asset, parseFloat(amount))
         setShowNaturalInput(false)
       }
     }
@@ -47,6 +39,7 @@ export default function BridgeWidget() {
   return (
     <div className="space-y-6">
       {/* Migrate Wallet button */}
+      {!state.migrateMode && (
       <motion.button
         whileHover={{ scale: 1.01 }}
         whileTap={{ scale: 0.97 }}
@@ -56,9 +49,16 @@ export default function BridgeWidget() {
         <div className="text-sm font-semibold text-gold">🚀 Migrate Wallet</div>
         <div className="text-xs text-text-secondary mt-0.5">Move all assets in one go</div>
       </motion.button>
+      )}
 
       <AnimatePresence mode="wait">
-        {state.step === 'asset' && (
+        {state.migrateMode && (
+          <motion.div key="migrate" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
+            <MigrateWallet />
+          </motion.div>
+        )}
+
+        {!state.migrateMode && state.step === 'asset' && (
           <motion.div key="asset" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
             <AssetSelect />
           </motion.div>
@@ -84,7 +84,7 @@ export default function BridgeWidget() {
       </AnimatePresence>
 
       {/* Natural language toggle */}
-      {state.step === 'asset' && (
+      {!state.migrateMode && state.step === 'asset' && (
         <div className="text-center">
           <button
             onClick={() => setShowNaturalInput(!state.showNaturalInput)}
