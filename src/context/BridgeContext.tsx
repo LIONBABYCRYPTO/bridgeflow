@@ -64,11 +64,18 @@ const BridgeContext = createContext<BridgeContextType | null>(null)
 export function BridgeProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<BridgeState>(defaultState)
   const routeRef = useRef<Route | null>(null)
+  const stateRef = useRef<BridgeState>(state)
+  const [bridgeLocked, setBridgeLocked] = useState(false)
   const { address } = useAccount()
   const { switchChainAsync } = useSwitchChain()
   const { sendTransactionAsync } = useSendTransaction()
 
   const patch = (partial: Partial<BridgeState>) => setState(s => ({ ...s, ...partial }))
+
+  // Keep stateRef in sync with state
+  useEffect(() => {
+    stateRef.current = state
+  }, [state])
 
   const fetchRouteFn = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
     patch({ loadingRoute: true, route: null, routeError: null, bridgeStatus: 'idle', bridgeError: null })
@@ -102,16 +109,20 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
     try {
       onStatus('preparing')
 
-      // Step 1: Switch to the source chain if needed
+      // Step 1: Switch to the source chain with verification
       onStatus('switching_chain')
       try {
-        await switchChainAsync({ chainId: txData.fromChainId })
+        const switchResult = await switchChainAsync({ chainId: txData.fromChainId })
+        // Verify we're actually on the correct chain after switch
+        if (switchResult.chainId !== txData.fromChainId) {
+          return { success: false, error: `Failed to verify chain switch to ${txData.fromChainId}. Please try again.` }
+        }
       } catch (switchErr: any) {
         if (switchErr?.code === 4902) {
           return { success: false, error: `Chain ${txData.fromChainId} not available in your wallet.` }
         }
-        // User rejected switch
-        return { success: false, error: 'Network switch cancelled. Please switch to the correct network.' }
+        // User rejected switch or other error
+        return { success: false, error: 'Network switch cancelled. Please switch to the correct network manually.' }
       }
 
       // Step 2: Handle token approval if needed (ERC-20 tokens)
@@ -125,9 +136,9 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
           })
           onStatus('approve_sent', approveHash)
           
-          // Wait for approval confirmation
-          // (real production would use useWaitForTransactionReceipt)
-          await new Promise(r => setTimeout(r, 2000))
+          // Wait for approval confirmation with longer timeout
+          // In production, use useWaitForTransactionReceipt to verify on-chain
+          await new Promise(r => setTimeout(r, 3000))
         } catch (approveErr: any) {
           const msg = approveErr?.message || ''
           if (msg.includes('User rejected') || msg.includes('user rejected')) {
@@ -160,7 +171,10 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
         return { success: false, error: msg || 'Transaction failed.' }
       }
     } catch (e: any) {
-      console.error('Execute error:', e)
+      console.error('[BridgeFlow] Execute error:', {
+        error: e?.message || 'Unknown error',
+        timestamp: new Date().toISOString(),
+      })
       const msg = e?.message || ''
       if (msg.includes('User rejected') || msg.includes('user rejected')) {
         return { success: false, error: 'Transaction was cancelled.' }
@@ -171,106 +185,133 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
 
   // fetch quote + immediately bridge (used by MigrateWallet)
   const fetchAndBridge = useCallback(async (from: ChainId, to: ChainId, asset: Asset, amount: number) => {
-    patch({
-      fromChain: from,
-      toChain: to,
-      asset: asset,
-      amount: String(amount),
-      loadingRoute: true,
-      route: null,
-      routeError: null,
-      bridgeStatus: 'preparing',
-      bridgeError: null,
-      migrateMode: false,
-    })
-
-    const result = await fetchLiveRoute(from, to, asset, amount, address || undefined)
-    if (result.rawRoute) routeRef.current = result.rawRoute
-
-    if (!result.route) {
-      patch({ loadingRoute: false, routeError: result.error || 'No route available.' })
+    // Prevent duplicate bridge executions
+    if (bridgeLocked) {
+      patch({ bridgeError: 'Bridge is already in progress. Please wait...' })
       return
     }
 
-    patch({ route: result.route, loadingRoute: false })
-
-    // Now execute the bridge via wagmi hooks
-    patch({ step: 'bridge', bridgeStatus: 'preparing' })
-
-    const execResult = await executeBridge(result.rawRoute, (status, txHash) => {
-      const statusMap: Record<string, BridgeState['bridgeStatus']> = {
-        preparing: 'preparing',
-        switching_chain: 'switching_chain',
-        approving: 'approving',
-        approve_sent: 'approve_sent',
-        bridging: 'bridging',
-        confirming: 'confirming',
-        complete: 'done',
-        error: 'error',
-      }
-      const mapped = statusMap[status] || 'bridging'
-      patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
-    })
-
-    if (execResult.success) {
-      addHistory({
-        id: Date.now().toString(),
-        asset,
-        amount,
+    setBridgeLocked(true)
+    try {
+      patch({
         fromChain: from,
         toChain: to,
-        status: 'completed',
-        timestamp: new Date().toLocaleString(),
-        txHash: execResult.txHash || 'sent',
+        asset: asset,
+        amount: String(amount),
+        loadingRoute: true,
+        route: null,
+        routeError: null,
+        bridgeStatus: 'preparing',
+        bridgeError: null,
+        migrateMode: false,
       })
-      patch({ bridgeStatus: 'done', txHash: execResult.txHash || null, step: 'complete' })
-    } else {
-      patch({ bridgeStatus: 'error', bridgeError: execResult.error || 'Bridge failed' })
+
+      const result = await fetchLiveRoute(from, to, asset, amount, address || undefined)
+      if (result.rawRoute) routeRef.current = result.rawRoute
+
+      if (!result.route) {
+        patch({ loadingRoute: false, routeError: result.error || 'No route available.' })
+        return
+      }
+
+      patch({ route: result.route, loadingRoute: false })
+
+      // Now execute the bridge via wagmi hooks
+      patch({ step: 'bridge', bridgeStatus: 'preparing' })
+
+      const execResult = await executeBridge(result.rawRoute, (status, txHash) => {
+        const statusMap: Record<string, BridgeState['bridgeStatus']> = {
+          preparing: 'preparing',
+          switching_chain: 'switching_chain',
+          approving: 'approving',
+          approve_sent: 'approve_sent',
+          bridging: 'bridging',
+          confirming: 'confirming',
+          complete: 'done',
+          error: 'error',
+        }
+        const mapped = statusMap[status] || 'bridging'
+        patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
+      })
+
+      if (execResult.success) {
+        addHistory({
+          id: Date.now().toString(),
+          asset,
+          amount,
+          fromChain: from,
+          toChain: to,
+          status: 'completed',
+          timestamp: new Date().toLocaleString(),
+          txHash: execResult.txHash || 'sent',
+        })
+        patch({ bridgeStatus: 'done', txHash: execResult.txHash || null, step: 'complete' })
+      } else {
+        patch({ bridgeStatus: 'error', bridgeError: execResult.error || 'Bridge failed' })
+      }
+    } finally {
+      setBridgeLocked(false)
     }
-  }, [address, executeBridge])
+  }, [address, executeBridge, bridgeLocked])
 
   // Non-migrate flow: review then bridge
   const startBridge = useCallback(async () => {
+    // Prevent duplicate bridge executions
+    if (bridgeLocked) {
+      patch({ bridgeError: 'Bridge is already in progress. Please wait...' })
+      return
+    }
+
     const rawRoute = routeRef.current
     const s = stateRef.current
     if (!rawRoute || !s.asset || !s.amount || !s.fromChain || !s.toChain) return
 
-    patch({ step: 'bridge', bridgeStatus: 'preparing', bridgeError: null })
+    setBridgeLocked(true)
+    try {
+      patch({ step: 'bridge', bridgeStatus: 'preparing', bridgeError: null })
 
-    const result = await executeBridge(rawRoute, (status, txHash) => {
-      const statusMap: Record<string, BridgeState['bridgeStatus']> = {
-        preparing: 'preparing',
-        switching_chain: 'switching_chain',
-        approving: 'approving',
-        approve_sent: 'approve_sent',
-        bridging: 'bridging',
-        confirming: 'confirming',
-        complete: 'done',
-        error: 'error',
-      }
-      const mapped = statusMap[status] || 'bridging'
-      patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
-    })
-
-    if (result.success) {
-      addHistory({
-        id: Date.now().toString(),
-        asset: s.asset!,
-        amount: parseFloat(s.amount) || 0,
-        fromChain: s.fromChain!,
-        toChain: s.toChain!,
-        status: 'completed',
-        timestamp: new Date().toLocaleString(),
-        txHash: result.txHash || 'sent',
+      const result = await executeBridge(rawRoute, (status, txHash) => {
+        const statusMap: Record<string, BridgeState['bridgeStatus']> = {
+          preparing: 'preparing',
+          switching_chain: 'switching_chain',
+          approving: 'approving',
+          approve_sent: 'approve_sent',
+          bridging: 'bridging',
+          confirming: 'confirming',
+          complete: 'done',
+          error: 'error',
+        }
+        const mapped = statusMap[status] || 'bridging'
+        patch({ bridgeStatus: mapped, ...(txHash ? { txHash } : {}) })
       })
-      patch({ bridgeStatus: 'done', txHash: result.txHash || null, step: 'complete' })
-    } else {
-      patch({ bridgeStatus: 'error', bridgeError: result.error || 'Bridge failed' })
-    }
-  }, [executeBridge])
 
-  const stateRef = useRef(state)
-  useEffect(() => { stateRef.current = state }, [state])
+      if (result.success) {
+        addHistory({
+          id: Date.now().toString(),
+          asset: s.asset!,
+          amount: parseFloat(s.amount) || 0,
+          fromChain: s.fromChain!,
+          toChain: s.toChain!,
+          status: 'completed',
+          timestamp: new Date().toLocaleString(),
+          txHash: result.txHash || 'sent',
+        })
+        patch({ bridgeStatus: 'done', txHash: result.txHash || null, step: 'complete' })
+      } else {
+        patch({ bridgeStatus: 'error', bridgeError: result.error || 'Bridge failed' })
+      }
+    } finally {
+      setBridgeLocked(false)
+    }
+  }, [executeBridge, bridgeLocked])
+
+  // Clear routes when account changes
+  useEffect(() => {
+    if (!address) {
+      setState(defaultState)
+      routeRef.current = null
+    }
+  }, [address])
 
   return (
     <BridgeContext.Provider value={{
