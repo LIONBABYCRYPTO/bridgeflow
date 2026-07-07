@@ -114,7 +114,7 @@ export function BridgeProvider({ children }: { children: ReactNode }) {
       try {
         const switchResult = await switchChainAsync({ chainId: txData.fromChainId })
         // Verify we're actually on the correct chain after switch
-        if (switchResult.chainId !== txData.fromChainId) {
+        if (switchResult.id !== txData.fromChainId) {
           return { success: false, error: `Failed to verify chain switch to ${txData.fromChainId}. Please try again.` }
         }
       } catch (switchErr: any) {
